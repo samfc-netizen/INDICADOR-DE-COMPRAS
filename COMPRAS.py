@@ -283,11 +283,6 @@ def load_data(path: str):
         col_so_data = find_col(df_sellout, "DATA") or find_col(df_sellout, "DT") or find_col(df_sellout, "DT_VENDA")
 
         col_so_cod = find_col(df_sellout, "CÓDIGO") or find_col(df_sellout, "CODIGO")
-        col_so_segmento = (
-            find_col(df_sellout, "SEGMENTO")
-            or find_col(df_sellout, "GRUPO/SEGMENTO")
-            or find_col(df_sellout, "GRUPO")
-        )
         col_so_desc_prod = (
             find_col(df_sellout, "DESCRIÇÃO DO PRODUTO")
             or find_col(df_sellout, "DESCRICAO DO PRODUTO")
@@ -319,7 +314,6 @@ def load_data(path: str):
         df_sellout["LINHA"] = df_sellout[col_so_linha].astype(str).fillna("").str.strip() if col_so_linha else ""
 
         df_sellout["CODIGO"] = df_sellout[col_so_cod].astype(str).fillna("").str.strip() if col_so_cod else ""
-        df_sellout["SEGMENTO"] = df_sellout[col_so_segmento].astype(str).fillna("").str.strip() if col_so_segmento else ""
         df_sellout["DESCRICAO_PRODUTO"] = df_sellout[col_so_desc_prod].astype(str).fillna("").str.strip() if col_so_desc_prod else ""
         df_sellout["QTD_FATUR"] = to_float(df_sellout[col_so_qtd]) if col_so_qtd else 0.0
 
@@ -792,35 +786,97 @@ def render_sellout_page():
 
     st.divider()
 
-    segmentos_validos = df_sellout_f["SEGMENTO"].astype(str).str.strip().ne("") if "SEGMENTO" in df_sellout_f.columns else pd.Series(False, index=df_sellout_f.index)
-    if segmentos_validos.any():
-        st.subheader("Faturamento por Segmento")
+    # Novo KPI: Fornecedor -> Linhas -> Produtos
+    st.subheader("Drill por Fornecedor — Linhas e Produtos")
 
-        segmento_tab = (
-            df_sellout_f.loc[segmentos_validos]
-            .groupby("SEGMENTO", as_index=False)
+    nome_so_drill = (
+        df_sellout_f.groupby(["FORN_KEY", "FORNECEDOR_SELLOUT"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_SELLOUT"]]
+        .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+    )
+
+    forn_drill_tab = (
+        df_sellout_f.groupby("FORN_KEY", as_index=False)
+        .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+        .merge(nome_so_drill, on="FORN_KEY", how="left")
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+
+    if forn_drill_tab.empty:
+        st.info("Sem fornecedores no SELLOUT para o recorte selecionado.")
+    else:
+        forn_options = forn_drill_tab["FORNECEDOR"].fillna("").astype(str).tolist()
+        sel_forn_drill = st.selectbox(
+            "Selecione o Fornecedor (SELLOUT)",
+            options=forn_options,
+            index=0,
+            key="sellout_fornecedor_drill_select"
+        )
+
+        sel_forn_key = forn_drill_tab.loc[forn_drill_tab["FORNECEDOR"] == sel_forn_drill, "FORN_KEY"].iloc[0]
+        so_forn_base = df_sellout_f[df_sellout_f["FORN_KEY"] == sel_forn_key].copy()
+
+        linhas_forn = (
+            so_forn_base[so_forn_base["LINHA"].astype(str).str.strip() != ""]
+            .groupby("LINHA", as_index=False)
             .agg(FATURAMENTO=("FATURAMENTO", "sum"))
             .sort_values("FATURAMENTO", ascending=False)
         )
 
-        fig_segmento = px.bar(
-            segmento_tab,
-            x="SEGMENTO",
-            y="FATURAMENTO",
-            text="FATURAMENTO",
-            title="Faturamento por Segmento"
-        )
-        fig_segmento.update_traces(texttemplate="R$ %{y:,.2f}", textposition="outside")
-        fig_segmento.update_layout(xaxis_title="Segmento", yaxis_title="Faturamento", margin=dict(t=60, l=10, r=10, b=10))
-        st.plotly_chart(fig_segmento, use_container_width=True)
+        total_forn = float(linhas_forn["FATURAMENTO"].sum())
+        linhas_forn["% LINHA / FORNECEDOR"] = (linhas_forn["FATURAMENTO"] / total_forn) if total_forn != 0 else 0.0
 
+        st.markdown("#### Linhas do Fornecedor")
         st.dataframe(
-            segmento_tab.rename(columns={"FATURAMENTO": "FATURAMENTO"}).style.format({
+            linhas_forn.style.format({
                 "FATURAMENTO": brl,
+                "% LINHA / FORNECEDOR": lambda x: pct_str(float(x)),
             }),
             use_container_width=True,
             hide_index=True
         )
+
+        if linhas_forn.empty:
+            st.info("Esse fornecedor não possui linha preenchida no recorte selecionado.")
+        else:
+            linha_options = linhas_forn["LINHA"].astype(str).tolist()
+            sel_linha_forn = st.selectbox(
+                "Selecione a Linha do Fornecedor",
+                options=linha_options,
+                index=0,
+                key="sellout_linha_fornecedor_select"
+            )
+
+            so_line_forn = so_forn_base[so_forn_base["LINHA"].astype(str) == str(sel_linha_forn)].copy()
+            total_line_forn = float(so_line_forn["FATURAMENTO"].sum())
+
+            desc_canon_forn = (
+                so_line_forn.groupby("CODIGO", as_index=False)["DESCRICAO_PRODUTO"]
+                .apply(most_frequent_nonempty)
+                .rename(columns={"DESCRICAO_PRODUTO": "DESCRIÇÃO DO PRODUTO"})
+            )
+
+            prod_line_forn = (
+                so_line_forn.groupby("CODIGO", as_index=False)
+                .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+                .sort_values("FATURAMENTO", ascending=False)
+            )
+            prod_line_forn = prod_line_forn.merge(desc_canon_forn, on="CODIGO", how="left")
+            prod_line_forn["DESCRIÇÃO DO PRODUTO"] = prod_line_forn["DESCRIÇÃO DO PRODUTO"].fillna("")
+            prod_line_forn["% PRODUTO / LINHA"] = (prod_line_forn["FATURAMENTO"] / total_line_forn) if total_line_forn != 0 else 0.0
+
+            st.markdown("#### Produtos da Linha Selecionada")
+            st.dataframe(
+                prod_line_forn[["CODIGO", "DESCRIÇÃO DO PRODUTO", "FATURAMENTO", "% PRODUTO / LINHA"]]
+                .style.format({
+                    "FATURAMENTO": brl,
+                    "% PRODUTO / LINHA": lambda x: pct_str(float(x)),
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
 
     st.divider()
 
