@@ -5,6 +5,7 @@ import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import date
+from pathlib import Path
 
 st.set_page_config(page_title="Dashboard de Vendas", layout="wide")
 st.title("Dashboard de Vendas Dauto Tintas")
@@ -12,6 +13,29 @@ st.title("Dashboard de Vendas Dauto Tintas")
 top_card = st.empty()
 
 ARQUIVO_EXCEL = "BASE .xlsx"
+
+
+def resolver_arquivo_excel() -> str:
+    """Tenta localizar o Excel em caminhos prováveis da aplicação."""
+    candidatos = [
+        Path(ARQUIVO_EXCEL),
+        Path(__file__).resolve().parent / ARQUIVO_EXCEL,
+        Path.cwd() / ARQUIVO_EXCEL,
+        Path("/mount/src/indicador-de-compras") / ARQUIVO_EXCEL,
+    ]
+
+    vistos = set()
+    for cand in candidatos:
+        cand_str = str(cand)
+        if cand_str in vistos:
+            continue
+        vistos.add(cand_str)
+        if cand.exists() and cand.is_file():
+            return cand_str
+
+    raise FileNotFoundError(
+        f"Arquivo Excel não encontrado. Coloque o arquivo '{ARQUIVO_EXCEL}' na mesma pasta do app ou ajuste a variável ARQUIVO_EXCEL."
+    )
 
 
 # ========= Helpers =========
@@ -199,7 +223,8 @@ PLOT_CONFIG_INTERACTIVE_NO_ZOOM = {
 # ========= Cache de dados =========
 @st.cache_data(ttl=10)
 def carregar_dados():
-    df = pd.read_excel(ARQUIVO_EXCEL, sheet_name=0)
+    caminho_excel = resolver_arquivo_excel()
+    df = pd.read_excel(caminho_excel, sheet_name=0)
     df.columns = df.columns.astype(str).str.strip()
 
     # força object -> string (ajuda em filtros)
@@ -318,7 +343,7 @@ def carregar_movimentacoes_compras():
     def _try_read_sheet(candidates: list[str]) -> pd.DataFrame:
         for sh in candidates:
             try:
-                dfx = pd.read_excel(ARQUIVO_EXCEL, sheet_name=sh)
+                dfx = pd.read_excel(resolver_arquivo_excel(), sheet_name=sh)
                 dfx.columns = dfx.columns.astype(str).str.strip()
                 # força object -> string (ajuda em filtros)
                 obj_cols = dfx.select_dtypes(include=["object"]).columns
@@ -385,7 +410,7 @@ def carregar_referencias_planejamento():
     def _read_first(candidates: list[str]) -> pd.DataFrame:
         for sh in candidates:
             try:
-                dfx = pd.read_excel(ARQUIVO_EXCEL, sheet_name=sh)
+                dfx = pd.read_excel(resolver_arquivo_excel(), sheet_name=sh)
                 dfx.columns = dfx.columns.astype(str).str.strip()
                 return dfx
             except Exception:
@@ -549,7 +574,12 @@ def montar_df_metas_fixas(lojas_keys):
 # =========================
 # Carrega e prepara base
 # =========================
-df = carregar_dados()
+try:
+    df = carregar_dados()
+except FileNotFoundError as e:
+    st.error(str(e))
+    st.stop()
+
 df = df[df["FAT_LINHA"].notna()].copy()
 
 # ========= Define a métrica de valor do cliente =========
