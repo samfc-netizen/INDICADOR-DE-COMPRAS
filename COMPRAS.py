@@ -283,6 +283,11 @@ def load_data(path: str):
         col_so_data = find_col(df_sellout, "DATA") or find_col(df_sellout, "DT") or find_col(df_sellout, "DT_VENDA")
 
         col_so_cod = find_col(df_sellout, "CÓDIGO") or find_col(df_sellout, "CODIGO")
+        col_so_segmento = (
+            find_col(df_sellout, "SEGMENTO")
+            or find_col(df_sellout, "GRUPO/SEGMENTO")
+            or find_col(df_sellout, "GRUPO")
+        )
         col_so_desc_prod = (
             find_col(df_sellout, "DESCRIÇÃO DO PRODUTO")
             or find_col(df_sellout, "DESCRICAO DO PRODUTO")
@@ -314,6 +319,7 @@ def load_data(path: str):
         df_sellout["LINHA"] = df_sellout[col_so_linha].astype(str).fillna("").str.strip() if col_so_linha else ""
 
         df_sellout["CODIGO"] = df_sellout[col_so_cod].astype(str).fillna("").str.strip() if col_so_cod else ""
+        df_sellout["SEGMENTO"] = df_sellout[col_so_segmento].astype(str).fillna("").str.strip() if col_so_segmento else ""
         df_sellout["DESCRICAO_PRODUTO"] = df_sellout[col_so_desc_prod].astype(str).fillna("").str.strip() if col_so_desc_prod else ""
         df_sellout["QTD_FATUR"] = to_float(df_sellout[col_so_qtd]) if col_so_qtd else 0.0
 
@@ -783,6 +789,38 @@ def render_sellout_page():
         use_container_width=True,
         hide_index=True
     )
+
+    st.divider()
+
+    segmentos_validos = df_sellout_f["SEGMENTO"].astype(str).str.strip().ne("") if "SEGMENTO" in df_sellout_f.columns else pd.Series(False, index=df_sellout_f.index)
+    if segmentos_validos.any():
+        st.subheader("Faturamento por Segmento")
+
+        segmento_tab = (
+            df_sellout_f.loc[segmentos_validos]
+            .groupby("SEGMENTO", as_index=False)
+            .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+            .sort_values("FATURAMENTO", ascending=False)
+        )
+
+        fig_segmento = px.bar(
+            segmento_tab,
+            x="SEGMENTO",
+            y="FATURAMENTO",
+            text="FATURAMENTO",
+            title="Faturamento por Segmento"
+        )
+        fig_segmento.update_traces(texttemplate="R$ %{y:,.2f}", textposition="outside")
+        fig_segmento.update_layout(xaxis_title="Segmento", yaxis_title="Faturamento", margin=dict(t=60, l=10, r=10, b=10))
+        st.plotly_chart(fig_segmento, use_container_width=True)
+
+        st.dataframe(
+            segmento_tab.rename(columns={"FATURAMENTO": "FATURAMENTO"}).style.format({
+                "FATURAMENTO": brl,
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
 
     st.divider()
 
