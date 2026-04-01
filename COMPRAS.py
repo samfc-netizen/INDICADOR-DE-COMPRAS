@@ -438,11 +438,11 @@ def render_compras_page():
     tab = tab[["FORNECEDOR", "COMPRAS FORNECEDOR", "VENDAS CMV", "DIF (CMV - COMPRAS)"]].sort_values("COMPRAS FORNECEDOR", ascending=False)
 
     st.dataframe(
-        tab.style
-          .format({"COMPRAS FORNECEDOR": brl, "VENDAS CMV": brl, "DIF (CMV - COMPRAS)": brl})
-          .applymap(style_dif, subset=["DIF (CMV - COMPRAS)"]),
-        use_container_width=True,
-        hide_index=True
+    tab.style
+      .format({"COMPRAS FORNECEDOR": brl, "VENDAS CMV": brl, "DIF (CMV - COMPRAS)": brl})
+      .map(style_dif, subset=["DIF (CMV - COMPRAS)"]),
+    use_container_width=True,
+    hide_index=True
     )
 
     st.divider()
@@ -627,7 +627,7 @@ def render_compras_page():
               "PART_VENDA_%": lambda x: pct_str(float(x)),
               "PART_ESTOQUE_%": lambda x: pct_str(float(x)),
           })
-          .applymap(style_dif, subset=["DIF (CMV - COMPRAS)"]),
+          .map(style_dif, subset=["DIF (CMV - COMPRAS)"]),
         use_container_width=True,
         hide_index=True
     )
