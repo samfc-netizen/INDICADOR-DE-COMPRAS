@@ -359,15 +359,35 @@ if df_sellout is not None and "ANO" in df_sellout.columns and df_sellout["ANO"].
     anos_sellout = sorted(df_sellout["ANO"].dropna().astype(int).unique().tolist())
 
 anos = sorted(set(anos_citel + anos_ent + anos_sellout))
-sel_anos = st.sidebar.multiselect("Ano", options=anos, default=anos)
+# Os filtros globais ficam dentro de um formulário para evitar que cada clique
+# provoque a reconstrução completa de todas as tabelas e gráficos.
+with st.sidebar.form("form_filtros_globais", clear_on_submit=False):
+    sel_anos_input = st.multiselect(
+        "Ano",
+        options=anos,
+        default=st.session_state.get("filtro_anos_aplicado", anos),
+        key="filtro_anos_input",
+    )
+    sel_meses_input = st.multiselect(
+        "Mês",
+        options=MESES_LABELS,
+        default=st.session_state.get("filtro_meses_aplicado", MESES_LABELS),
+        key="filtro_meses_input",
+    )
+    aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
 
-sel_meses = st.sidebar.multiselect("Mês", options=MESES_LABELS, default=MESES_LABELS)
+if aplicar_filtros or "filtro_anos_aplicado" not in st.session_state:
+    st.session_state["filtro_anos_aplicado"] = sel_anos_input
+    st.session_state["filtro_meses_aplicado"] = sel_meses_input
+
+sel_anos = st.session_state.get("filtro_anos_aplicado", anos)
+sel_meses = st.session_state.get("filtro_meses_aplicado", MESES_LABELS)
 sel_meses_num = [MESES_PT[m] for m in sel_meses if m in MESES_PT]
 
 def apply_month_year_filter(df, apply_year=True, apply_month=True):
     if df is None:
         return None
-    out = df.copy()
+    out = df
     if apply_year and sel_anos and "ANO" in out.columns and out["ANO"].notna().any():
         out = out[out["ANO"].isin(sel_anos)]
     if apply_month and sel_meses_num and "MES_NUM" in out.columns:
@@ -565,9 +585,26 @@ def render_compras_page():
 
     # Filtro de marcas (somente ENTRADAS)
     marcas = sorted([m for m in ent_base["MARCA"].dropna().astype(str).unique().tolist() if m.strip() != ""])
-    sel_marcas = st.multiselect("Filtrar Marcas (ENTRADAS)", options=marcas, default=marcas, key="drill_marcas_multiselect")
+    # Aplicação explícita evita um rerun pesado a cada marca marcada/desmarcada.
+    marcas_state_key = f"drill_marcas_aplicadas::{sel_forn_key or 'TODOS'}"
+    marcas_default = st.session_state.get(marcas_state_key, marcas)
+    marcas_default = [m for m in marcas_default if m in marcas]
+
+    with st.form("form_filtro_marcas", clear_on_submit=False):
+        sel_marcas_input = st.multiselect(
+            "Filtrar Marcas (ENTRADAS)",
+            options=marcas,
+            default=marcas_default,
+            key=f"drill_marcas_input::{sel_forn_key or 'TODOS'}",
+        )
+        aplicar_marcas = st.form_submit_button("Aplicar marcas")
+
+    if aplicar_marcas or marcas_state_key not in st.session_state:
+        st.session_state[marcas_state_key] = sel_marcas_input
+
+    sel_marcas = st.session_state.get(marcas_state_key, marcas)
     if sel_marcas:
-        ent_base = ent_base[ent_base["MARCA"].isin(sel_marcas)].copy()
+        ent_base = ent_base[ent_base["MARCA"].isin(sel_marcas)]
 
     if ent_base.empty:
         st.warning("Esse recorte ficou sem dados em ENTRADAS (verifique o fornecedor/marcas).")
@@ -633,25 +670,36 @@ def render_compras_page():
     )
 
     st.markdown("##### Participação por Linha (Mapa / Treemap)")
+    exibir_mapas = st.toggle(
+        "Exibir mapas detalhados",
+        value=False,
+        help="Os três mapas são pesados. Ative somente quando precisar analisá-los.",
+        key="exibir_treemaps_compras",
+    )
 
-    path_cols = ["MARCA"]
-    if has_grupo:
-        path_cols.append("GRUPO")
-    path_cols.append("LINHA")
+    if exibir_mapas:
+        path_cols = ["MARCA"]
+        if has_grupo:
+            path_cols.append("GRUPO")
+        path_cols.append("LINHA")
 
-    g1, g2, g3 = st.columns(3)
-    with g1:
-        fig_comp = px.treemap(dr, path=path_cols, values="COMPRAS", title="Compras (ENTRADAS)")
-        fig_comp.update_layout(margin=dict(t=50, l=10, r=10, b=10))
-        st.plotly_chart(fig_comp, use_container_width=True)
-    with g2:
-        fig_vend = px.treemap(dr, path=path_cols, values="VENDAS_CMV", title="Vendas (CMV)")
-        fig_vend.update_layout(margin=dict(t=50, l=10, r=10, b=10))
-        st.plotly_chart(fig_vend, use_container_width=True)
-    with g3:
-        fig_est = px.treemap(dr, path=path_cols, values="VLR_ESTOQUE", title="Valor de Estoque (CMV E ESTOQUE)")
-        fig_est.update_layout(margin=dict(t=50, l=10, r=10, b=10))
-        st.plotly_chart(fig_est, use_container_width=True)
+        # Remove linhas sem valor antes de montar os gráficos, reduzindo memória e JSON.
+        dr_plot = dr.loc[(dr["COMPRAS"] != 0) | (dr["VENDAS_CMV"] != 0) | (dr["VLR_ESTOQUE"] != 0)].copy()
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            fig_comp = px.treemap(dr_plot, path=path_cols, values="COMPRAS", title="Compras (ENTRADAS)")
+            fig_comp.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_comp, use_container_width=True, key="treemap_compras")
+        with g2:
+            fig_vend = px.treemap(dr_plot, path=path_cols, values="VENDAS_CMV", title="Vendas (CMV)")
+            fig_vend.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_vend, use_container_width=True, key="treemap_vendas")
+        with g3:
+            fig_est = px.treemap(dr_plot, path=path_cols, values="VLR_ESTOQUE", title="Valor de Estoque (CMV E ESTOQUE)")
+            fig_est.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_est, use_container_width=True, key="treemap_estoque")
+    else:
+        st.caption("Mapas desativados para manter os filtros leves e estáveis.")
 
     # Totais do recorte do Drill
     t1, t2, t3 = st.columns(3)
