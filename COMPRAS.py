@@ -347,7 +347,7 @@ except Exception as e:
 # Sidebar: Página + filtros
 # -----------------------------
 st.sidebar.title("Navegação")
-page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT"])
+page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR"])
 
 st.sidebar.divider()
 st.sidebar.subheader("Filtros")
@@ -406,7 +406,7 @@ df_sellout_f = apply_month_year_filter(df_sellout, apply_year=True, apply_month=
 def render_compras_page():
     st.title("INDICADORES DE COMPRAS")
 
-    # Cards topo
+    # Resumo geral do período selecionado
     total_compras_citel = float(df_citel_f["COMPRA_VALOR"].sum())
     total_vendas_cmv = float(df_cmv_f["CMV_VALOR"].sum())
     dif_topo = total_vendas_cmv - total_compras_citel
@@ -418,21 +418,44 @@ def render_compras_page():
     else:
         dif_pct = 0.0
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("### TOTAL COMPRAS (CITEL)")
-        st.markdown(f"<div style='font-size:28px;font-weight:900'>{brl(total_compras_citel)}</div>", unsafe_allow_html=True)
-    with c2:
-        st.markdown("### TOTAL VENDAS CMV")
-        st.markdown(f"<div style='font-size:28px;font-weight:900'>{brl(total_vendas_cmv)}</div>", unsafe_allow_html=True)
-    with c3:
-        color = "#0a7a2f" if dif_topo >= 0 else "#b00020"
-        st.markdown("### DIFERENÇA (CMV - COMPRAS)")
-        st.markdown(
-            f"<div style='font-size:28px;font-weight:1000;color:{color}'>{brl(dif_topo)} "
-            f"<span style='font-size:18px;font-weight:900'>({pct_str(dif_pct)})</span></div>",
-            unsafe_allow_html=True
-        )
+    # Quantidade real de competências selecionadas (ano x mês), usada nas médias.
+    periodos_selecionados = max(len(sel_anos) * len(sel_meses_num), 1)
+    media_compras = total_compras_citel / periodos_selecionados
+    media_cmv = total_vendas_cmv / periodos_selecionados
+    media_diferenca = dif_topo / periodos_selecionados
+
+    st.subheader("Resumo do Período Selecionado")
+
+    resumo_periodo = pd.DataFrame({
+        "INDICADOR": ["Total Compras", "Total CMV", "Diferença (CMV - Compras)"],
+        "VALOR": [total_compras_citel, total_vendas_cmv, dif_topo],
+        "% SOBRE COMPRAS": [1.0 if total_compras_citel else 0.0,
+                              (total_vendas_cmv / total_compras_citel) if total_compras_citel else 0.0,
+                              dif_pct],
+    })
+
+    st.dataframe(
+        resumo_periodo.style
+        .format({
+            "VALOR": brl,
+            "% SOBRE COMPRAS": lambda x: pct_str(float(x)),
+        })
+        .map(style_dif, subset=["VALOR"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Média de Compras por Período", brl(media_compras))
+    with m2:
+        st.metric("Média de CMV por Período", brl(media_cmv))
+    with m3:
+        st.metric("Média da Diferença", brl(media_diferenca))
+    with m4:
+        st.metric("Períodos Considerados", periodos_selecionados)
+
+    st.caption("A média considera cada combinação de ano e mês selecionada nos filtros.")
 
     st.divider()
 
@@ -989,9 +1012,183 @@ def render_sellout_page():
 
 
 # -----------------------------
+# PAGE: HISTÓRICO POR FORNECEDOR
+# -----------------------------
+def render_historico_fornecedor_page():
+    st.title("HISTÓRICO MENSAL POR FORNECEDOR")
+    st.caption("Acompanhe, mês a mês, as Compras, o CMV e o Sellout do fornecedor selecionado.")
+
+    # Cadastro canônico de fornecedores reunindo todas as fontes disponíveis.
+    cadastros = []
+    if not df_citel.empty:
+        cadastros.append(
+            df_citel[["FORN_KEY", "FORNECEDOR_CITEL"]]
+            .rename(columns={"FORNECEDOR_CITEL": "FORNECEDOR"})
+        )
+    if not df_cmv.empty:
+        cadastros.append(
+            df_cmv[["FORN_KEY", "FORNECEDOR_CMV"]]
+            .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+        )
+    if df_sellout is not None and not df_sellout.empty:
+        cadastros.append(
+            df_sellout[["FORN_KEY", "FORNECEDOR_SELLOUT"]]
+            .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+        )
+
+    if not cadastros:
+        st.info("Não há fornecedores disponíveis nas bases carregadas.")
+        return
+
+    fornecedores_base = pd.concat(cadastros, ignore_index=True)
+    fornecedores_base["FORNECEDOR"] = fornecedores_base["FORNECEDOR"].fillna("").astype(str).str.strip()
+    fornecedores_base = fornecedores_base[
+        (fornecedores_base["FORN_KEY"].astype(str).str.strip() != "")
+        & (fornecedores_base["FORNECEDOR"] != "")
+    ]
+
+    fornecedores = (
+        fornecedores_base.groupby("FORN_KEY", as_index=False)
+        .agg(FORNECEDOR=("FORNECEDOR", most_frequent_nonempty))
+        .sort_values("FORNECEDOR")
+    )
+
+    if fornecedores.empty:
+        st.info("Não foi possível identificar fornecedores válidos nas bases.")
+        return
+
+    anos_hist = sorted(set(anos_citel + anos_sellout))
+    if not anos_hist:
+        anos_hist = anos if anos else []
+
+    f1, f2 = st.columns([2, 1])
+    with f1:
+        fornecedor_nome = st.selectbox(
+            "Fornecedor",
+            options=fornecedores["FORNECEDOR"].tolist(),
+            key="historico_fornecedor_select",
+        )
+    with f2:
+        ano_padrao = anos_hist[-1] if anos_hist else None
+        ano_hist = st.selectbox(
+            "Ano",
+            options=anos_hist,
+            index=(len(anos_hist) - 1) if anos_hist else 0,
+            key="historico_fornecedor_ano",
+        ) if anos_hist else None
+
+    fornecedor_key = fornecedores.loc[
+        fornecedores["FORNECEDOR"] == fornecedor_nome, "FORN_KEY"
+    ].iloc[0]
+
+    # Compras: fonte CITEL, com ano e mês da data de emissão.
+    compras_base = df_citel[df_citel["FORN_KEY"] == fornecedor_key].copy()
+    if ano_hist is not None and "ANO" in compras_base.columns:
+        compras_base = compras_base[compras_base["ANO"] == ano_hist]
+    compras_mes = compras_base.groupby("MES_NUM")["COMPRA_VALOR"].sum()
+
+    # CMV: a planilha CMV E ESTOQUE possui competência mensal, mas não possui ano.
+    cmv_base_hist = df_cmv[df_cmv["FORN_KEY"] == fornecedor_key].copy()
+    cmv_mes = cmv_base_hist.groupby("MES_NUM")["CMV_VALOR"].sum()
+
+    # Sellout: utiliza ano e mês disponíveis na aba SELLOUT.
+    if df_sellout is not None:
+        sellout_base = df_sellout[df_sellout["FORN_KEY"] == fornecedor_key].copy()
+        if ano_hist is not None and "ANO" in sellout_base.columns and sellout_base["ANO"].notna().any():
+            sellout_base = sellout_base[sellout_base["ANO"] == ano_hist]
+        sellout_mes = sellout_base.groupby("MES_NUM")["FATURAMENTO"].sum()
+    else:
+        sellout_mes = pd.Series(dtype=float)
+
+    historico = pd.DataFrame({"MES_NUM": range(1, 13)})
+    historico["MÊS"] = historico["MES_NUM"].map(
+        {i + 1: nome for i, nome in enumerate(MESES_LABELS)}
+    )
+    historico["COMPRAS"] = historico["MES_NUM"].map(compras_mes).fillna(0.0)
+    historico["CMV"] = historico["MES_NUM"].map(cmv_mes).fillna(0.0)
+    historico["SELLOUT"] = historico["MES_NUM"].map(sellout_mes).fillna(0.0)
+    historico["DIF. CMV - COMPRAS"] = historico["CMV"] - historico["COMPRAS"]
+
+    meses_com_movimento = int(
+        ((historico[["COMPRAS", "CMV", "SELLOUT"]].abs().sum(axis=1)) > 0).sum()
+    )
+    divisor_media = meses_com_movimento if meses_com_movimento > 0 else 12
+
+    total_compras = float(historico["COMPRAS"].sum())
+    total_cmv = float(historico["CMV"].sum())
+    total_sellout = float(historico["SELLOUT"].sum())
+
+    st.subheader(f"Resumo — {fornecedor_nome}" + (f" | {ano_hist}" if ano_hist else ""))
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Total Compras", brl(total_compras), help="Soma das compras do fornecedor no ano selecionado.")
+    with k2:
+        st.metric("Total CMV", brl(total_cmv), help="Soma do CMV mensal disponível na base CMV E ESTOQUE.")
+    with k3:
+        st.metric("Total Sellout", brl(total_sellout), help="Soma do faturamento Sellout do fornecedor no ano selecionado.")
+    with k4:
+        st.metric("Meses com Movimento", meses_com_movimento)
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.metric("Média Mensal de Compras", brl(total_compras / divisor_media))
+    with a2:
+        st.metric("Média Mensal de CMV", brl(total_cmv / divisor_media))
+    with a3:
+        st.metric("Média Mensal de Sellout", brl(total_sellout / divisor_media))
+
+    st.subheader("Histórico mensal")
+    st.dataframe(
+        historico[["MÊS", "COMPRAS", "CMV", "SELLOUT", "DIF. CMV - COMPRAS"]]
+        .style
+        .format({
+            "COMPRAS": brl,
+            "CMV": brl,
+            "SELLOUT": brl,
+            "DIF. CMV - COMPRAS": brl,
+        })
+        .map(style_dif, subset=["DIF. CMV - COMPRAS"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    grafico = historico.melt(
+        id_vars=["MES_NUM", "MÊS"],
+        value_vars=["COMPRAS", "CMV", "SELLOUT"],
+        var_name="INDICADOR",
+        value_name="VALOR",
+    )
+    fig = px.line(
+        grafico,
+        x="MÊS",
+        y="VALOR",
+        color="INDICADOR",
+        markers=True,
+        category_orders={"MÊS": MESES_LABELS},
+        title="Evolução mensal — Compras x CMV x Sellout",
+    )
+    fig.update_layout(
+        xaxis_title="Mês",
+        yaxis_title="Valor (R$)",
+        legend_title_text="Indicador",
+        hovermode="x unified",
+        margin=dict(t=55, l=10, r=10, b=10),
+    )
+    fig.update_yaxes(tickprefix="R$ ", separatethousands=True)
+    st.plotly_chart(fig, use_container_width=True, key="grafico_historico_fornecedor")
+
+    st.caption(
+        "Observação: a aba CMV E ESTOQUE possui o mês da competência, mas não possui uma coluna de ano. "
+        "Por isso, o CMV exibido representa os valores mensais disponíveis nessa aba; Compras e Sellout respeitam o ano selecionado."
+    )
+
+
+# -----------------------------
 # Render
 # -----------------------------
 if page == "COMPRAS":
     render_compras_page()
-else:
+elif page == "SELLOUT":
     render_sellout_page()
+else:
+    render_historico_fornecedor_page()
