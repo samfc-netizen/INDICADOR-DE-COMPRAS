@@ -5,7 +5,11 @@ import re
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
 
-EXCEL_PATH = "Indicador de compras.xlsx"
+GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
+CAD_FORNECEDORES_PATH = "CADASTRO DE FORNECEDORES.csv"
+CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
+SELLOUT_PATH = "sellout.csv"
+NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
 
 MESES_PT = {
     "JANEIRO": 1, "FEVEREIRO": 2, "MARÇO": 3, "MARCO": 3, "ABRIL": 4, "MAIO": 5, "JUNHO": 6,
@@ -134,212 +138,252 @@ def most_frequent_nonempty(series: pd.Series) -> str:
 # Carregamento
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def load_data(path: str):
-    xls = pd.ExcelFile(path)
+def read_report_csv(path: str, required_terms=()):
+    """Lê CSV exportado pelo Citel, localizando automaticamente a linha do cabeçalho."""
+    encodings = ("utf-8-sig", "latin1", "cp1252")
+    last_error = None
+    for encoding in encodings:
+        try:
+            with open(path, "r", encoding=encoding, errors="strict") as arq:
+                linhas = arq.readlines()
+            header_idx = None
+            terms = [colnorm(x) for x in required_terms]
+            for i, linha in enumerate(linhas[:250]):
+                norm = colnorm(linha.replace(";", " "))
+                if terms and all(t in norm for t in terms):
+                    header_idx = i
+                    break
+            if header_idx is None:
+                # fallback: primeira linha com vários separadores
+                for i, linha in enumerate(linhas[:250]):
+                    if linha.count(";") >= 3:
+                        header_idx = i
+                        break
+            if header_idx is None:
+                raise ValueError("Cabeçalho tabular não localizado.")
+            return strip_cols(pd.read_csv(
+                path, sep=";", skiprows=header_idx, encoding=encoding,
+                decimal=",", thousands=".", dtype=str, engine="python"
+            ))
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"Não foi possível ler {path}: {last_error}")
 
-    sh_cmv = find_sheet_name(xls, "CMV E ESTOQUE")
-    sh_ent = find_sheet_name(xls, "NOTAS ENTRADAS")
-    sh_citel = find_sheet_name(xls, "NOTAS CITEL")
-    sh_sellout = find_sheet_name(xls, "SELLOUT")
 
-    if sh_cmv is None:
-        raise ValueError(f"Não encontrei a aba 'CMV E ESTOQUE'. Abas: {xls.sheet_names}")
-    if sh_ent is None:
-        raise ValueError(f"Não encontrei a aba 'NOTAS ENTRADAS'. Abas: {xls.sheet_names}")
-    if sh_citel is None:
-        raise ValueError(f"Não encontrei a aba 'NOTAS CITEL'. Abas: {xls.sheet_names}")
+def only_digits(value) -> str:
+    if pd.isna(value):
+        return ""
+    return re.sub(r"\D", "", str(value))
 
-    df_cmv = strip_cols(pd.read_excel(xls, sh_cmv))
-    df_ent = strip_cols(pd.read_excel(xls, sh_ent))
-    df_citel = strip_cols(pd.read_excel(xls, sh_citel))
-    df_sellout = strip_cols(pd.read_excel(xls, sh_sellout)) if sh_sellout else None
 
-    # ---- CMV E ESTOQUE ----
-    col_cmv_forn = find_col(df_cmv, "FORNECEDOR")
-    col_cmv_cmv = find_col(df_cmv, "CMV")
-    col_cmv_mes = find_col(df_cmv, "MÊS") or find_col(df_cmv, "MES")
-    col_cmv_linha = find_col(df_cmv, "LINHA")
-    col_cmv_marca = find_col(df_cmv, "MARCA")
-    col_cmv_vlr_est = find_col(df_cmv, "VLR ESTOQUE") or find_col(df_cmv, "VLR_ESTOQUE") or find_col(df_cmv, "VALOR ESTOQUE")
+def product_key(value) -> str:
+    """Normaliza códigos como 020004.84658 para 84658 e 84658.0 para 84658."""
+    if pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if "." in s and re.fullmatch(r"\d+\.\d+", s):
+        left, right = s.split(".", 1)
+        # Código Citel composto: prefixo.Produto
+        if len(right) >= 4 and not set(right) <= {"0"}:
+            s = right
+        elif set(right) <= {"0"}:
+            s = left
+    digits = only_digits(s)
+    return digits.lstrip("0") or "0"
 
-    if col_cmv_forn is None and df_cmv.shape[1] >= 2:
-        col_cmv_forn = df_cmv.columns[1]
 
-    if col_cmv_forn is None:
-        raise ValueError(f"CMV E ESTOQUE: não encontrei FORNECEDOR. Colunas: {list(df_cmv.columns)}")
-    if col_cmv_cmv is None:
-        raise ValueError(f"CMV E ESTOQUE: não encontrei CMV. Colunas: {list(df_cmv.columns)}")
-    if col_cmv_linha is None:
-        raise ValueError(f"CMV E ESTOQUE: não encontrei LINHA. Colunas: {list(df_cmv.columns)}")
-    if col_cmv_vlr_est is None:
-        raise ValueError(f"CMV E ESTOQUE: não encontrei VLR ESTOQUE. Colunas: {list(df_cmv.columns)}")
+def parse_number_br(series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0.0)
+    s = series.fillna("").astype(str).str.strip()
+    both = s.str.contains(",", regex=False) & s.str.contains(".", regex=False)
+    s.loc[both] = s.loc[both].str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    comma = s.str.contains(",", regex=False) & ~s.str.contains(".", regex=False)
+    s.loc[comma] = s.loc[comma].str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
-    df_cmv = df_cmv.copy()
-    df_cmv["FORNECEDOR_CMV"] = df_cmv[col_cmv_forn].astype(str).fillna("").str.strip()
-    df_cmv["FORN_KEY"] = df_cmv["FORNECEDOR_CMV"].map(supplier_key)
-    df_cmv["CMV_VALOR"] = to_float(df_cmv[col_cmv_cmv])
-    df_cmv["ESTOQUE_VALOR"] = to_float(df_cmv[col_cmv_vlr_est])
-    df_cmv["LINHA"] = df_cmv[col_cmv_linha].astype(str).fillna("").str.strip()
-    df_cmv["MARCA"] = df_cmv[col_cmv_marca].astype(str).fillna("").str.strip() if col_cmv_marca else ""
 
-    if col_cmv_mes is not None:
-        df_cmv["MES_NUM"] = df_cmv[col_cmv_mes].map(month_number_from_text)
-    else:
-        df_cmv["MES_NUM"] = pd.NA
+def canonical_supplier(name, brand="") -> str:
+    """Consolida razão social e aplica as divisões comerciais solicitadas."""
+    raw = "" if pd.isna(name) else str(name).upper().strip()
+    brand_n = "" if pd.isna(brand) else str(brand).upper().strip()
+    raw = re.sub(r"^\s*\d+\s*[-–:]\s*", "", raw)
+    raw = re.sub(r"\b(LTDA|S/?A|SA|EIRELI|ME|EPP)\b\.?", " ", raw)
+    raw = re.sub(r"[^A-Z0-9À-Ü]+", " ", raw)
+    raw = " ".join(raw.split())
 
-    # ---- NOTAS CITEL ----
-    col_citel_forn = find_col(df_citel, "FORNECEDOR")
-    col_citel_val = find_col(df_citel, "VL_NOTA_FISCAL")
-    col_citel_dt = find_col(df_citel, "DT_EMISSAO")
-    col_citel_doc = find_col(df_citel, "NR_DOCUMENTO")
+    if brand_n in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}:
+        return "AKZO NOBEL AUTO"
+    if brand_n in {"CORAL", "MACTRA", "HAMMERITE", "CETOL SPARLACK", "SPARLACK", "CETOL"}:
+        return "AKZO NOBEL DECOR"
+    if "SAINT" in raw and "GOBAIN" in raw:
+        if "TEK BOND" in brand_n or "TEKBOND" in brand_n:
+            return "SAINT GOBAIN TEK BOND"
+        if "NORTON" in brand_n:
+            return "SAINT GOBAIN NORTON"
+        return "SAINT GOBAIN"
+    if re.search(r"(^| )3M( |$)", raw):
+        return "3M DO BRASIL"
+    if "AKZO" in raw and "NOBEL" in raw:
+        return "AKZO NOBEL"
+    return raw
 
-    if col_citel_forn is None:
-        raise ValueError(f"NOTAS CITEL: não encontrei FORNECEDOR. Colunas: {list(df_citel.columns)}")
-    if col_citel_val is None:
-        raise ValueError(f"NOTAS CITEL: não encontrei VL_NOTA_FISCAL. Colunas: {list(df_citel.columns)}")
-    if col_citel_dt is None:
-        raise ValueError(f"NOTAS CITEL: não encontrei DT_EMISSAO. Colunas: {list(df_citel.columns)}")
-    if col_citel_doc is None:
-        raise ValueError(f"NOTAS CITEL: não encontrei NR_DOCUMENTO. Colunas: {list(df_citel.columns)}")
 
-    df_citel = df_citel.copy()
-    df_citel["FORNECEDOR_CITEL"] = df_citel[col_citel_forn].astype(str).fillna("").str.strip()
-    df_citel["FORN_KEY"] = df_citel["FORNECEDOR_CITEL"].map(supplier_key)
-    df_citel["COMPRA_VALOR"] = to_float(df_citel[col_citel_val])
+def build_supplier_key(name, brand="") -> str:
+    return supplier_key(canonical_supplier(name, brand))
 
-    df_citel["DATA_DT"] = to_datetime_safe(df_citel[col_citel_dt])
-    df_citel["ANO"] = df_citel["DATA_DT"].dt.year
-    df_citel["MES_NUM"] = df_citel["DATA_DT"].dt.month
 
-    df_citel["NR_DOCUMENTO"] = df_citel[col_citel_doc]
-    df_citel["NOTA_KEY"] = df_citel["NR_DOCUMENTO"].map(nota_key)
+def empty_citel():
+    return pd.DataFrame(columns=[
+        "FORNECEDOR_CITEL", "FORN_KEY", "COMPRA_VALOR", "DATA_DT", "ANO",
+        "MES_NUM", "NR_DOCUMENTO", "NOTA_KEY"
+    ])
 
-    # ---- NOTAS ENTRADAS ----
-    col_ent_data = find_col(df_ent, "DATA")
-    col_ent_vr = (
-        find_col(df_ent, "VR. CONTÁBIL")
-        or find_col(df_ent, "VR CONTÁBIL")
-        or find_col(df_ent, "VR CONTABIL")
-        or find_col(df_ent, "VR. CONTABIL")
-    )
-    col_ent_nf = (
-        find_col(df_ent, "NR NOTA FISCAL")
-        or find_col(df_ent, "NR_NOTA_FISCAL")
-        or find_col(df_ent, "NR NOTA")
-        or find_col(df_ent, "NOTA FISCAL")
-    )
-    col_ent_fornecedor = (
-        find_col(df_ent, "DESCRIÇÃO")
-        or find_col(df_ent, "DESCRICAO")
-        or find_col(df_ent, "FORNECEDOR")
-    )
-    col_ent_marca = find_col(df_ent, "MARCA")
-    col_ent_linha = find_col(df_ent, "LINHA")
-    col_ent_grupo = find_col(df_ent, "GRUPO") or find_col(df_ent, "GRUPO/SEGMENTO") or find_col(df_ent, "SEGMENTO")
 
-    if col_ent_vr is None:
-        raise ValueError(f"NOTAS ENTRADAS: não encontrei VR. CONTÁBIL. Colunas: {list(df_ent.columns)}")
-    if col_ent_nf is None:
-        raise ValueError(f"NOTAS ENTRADAS: não encontrei 'NR NOTA FISCAL' (ou variações). Colunas: {list(df_ent.columns)}")
-    if col_ent_fornecedor is None:
-        raise ValueError(f"NOTAS ENTRADAS: não encontrei DESCRIÇÃO/FORNECEDOR. Colunas: {list(df_ent.columns)}")
-    if col_ent_linha is None:
-        raise ValueError(f"NOTAS ENTRADAS: não encontrei LINHA. Colunas: {list(df_ent.columns)}")
+@st.cache_data(show_spinner=False)
+def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str):
+    # ---------------- CADASTROS ----------------
+    cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."))
+    c_cnpj = find_col(cad_forn, "C.P.F./C.N.P.J.") or find_col(cad_forn, "CPF/CNPJ")
+    c_nome_f = find_col(cad_forn, "NOME DO FORNECEDOR")
+    if c_cnpj is None or c_nome_f is None:
+        raise ValueError(f"CADASTRO DE FORNECEDORES: colunas obrigatórias ausentes. Colunas: {list(cad_forn.columns)}")
+    cad_forn["CNPJ_KEY"] = cad_forn[c_cnpj].map(only_digits)
+    cad_forn["FORNECEDOR_CAD"] = cad_forn[c_nome_f].fillna("").astype(str).str.strip()
+    cad_forn = cad_forn[cad_forn["CNPJ_KEY"] != ""].drop_duplicates("CNPJ_KEY", keep="last")
+    cnpj_to_supplier = dict(zip(cad_forn["CNPJ_KEY"], cad_forn["FORNECEDOR_CAD"]))
 
-    df_ent = df_ent.copy()
-    df_ent["VR_CONTABIL"] = to_float(df_ent[col_ent_vr])
-    df_ent["NR_NOTA_FISCAL"] = df_ent[col_ent_nf]
-    df_ent["NOTA_KEY"] = df_ent["NR_NOTA_FISCAL"].map(nota_key)
-    df_ent["FORNECEDOR_ENT"] = df_ent[col_ent_fornecedor].astype(str).fillna("").str.strip()
-    df_ent["FORN_KEY"] = df_ent["FORNECEDOR_ENT"].map(supplier_key)
-    df_ent["MARCA"] = df_ent[col_ent_marca].astype(str).fillna("").str.strip() if col_ent_marca else ""
-    df_ent["LINHA"] = df_ent[col_ent_linha].astype(str).fillna("").str.strip()
-    df_ent["GRUPO"] = df_ent[col_ent_grupo].astype(str).fillna("").str.strip() if col_ent_grupo else ""
+    cad_prod = read_report_csv(cad_prod_path, ("Cód.Item", "Desc. Fornecedor", "Desc. Linha/Grupo"))
+    c_prod_cod = find_col(cad_prod, "CÓD.ITEM") or find_col(cad_prod, "COD.ITEM") or find_col(cad_prod, "CÓDIGO")
+    c_prod_forn = find_col(cad_prod, "DESC. FORNECEDOR")
+    c_prod_linha = find_col(cad_prod, "DESC. LINHA/GRUPO")
+    c_prod_marca = find_col(cad_prod, "DESC. MARCA")
+    if not all([c_prod_cod, c_prod_forn, c_prod_linha]):
+        raise ValueError(f"CADASTRO PRODUTOS GERAL: colunas obrigatórias ausentes. Colunas: {list(cad_prod.columns)}")
+    cad_prod["COD_KEY"] = cad_prod[c_prod_cod].map(product_key)
+    cad_prod["FORNECEDOR_PROD"] = cad_prod[c_prod_forn].fillna("").astype(str).str.strip()
+    cad_prod["LINHA_PROD"] = cad_prod[c_prod_linha].fillna("").astype(str).str.strip()
+    cad_prod["MARCA_PROD"] = cad_prod[c_prod_marca].fillna("").astype(str).str.strip() if c_prod_marca else ""
+    cad_prod = cad_prod[cad_prod["COD_KEY"] != ""].drop_duplicates("COD_KEY", keep="last")
+    prod_lookup = cad_prod[["COD_KEY", "FORNECEDOR_PROD", "LINHA_PROD", "MARCA_PROD"]]
 
-    if col_ent_data is not None:
-        df_ent["DATA_DT"] = to_datetime_safe(df_ent[col_ent_data])
-        df_ent["ANO"] = df_ent["DATA_DT"].dt.year
-        df_ent["MES_NUM"] = df_ent["DATA_DT"].dt.month
-    else:
-        df_ent["DATA_DT"] = pd.NaT
-        df_ent["ANO"] = pd.NA
-        df_ent["MES_NUM"] = pd.NA
+    # ---------------- GIRO / CMV / ESTOQUE + NOTAS CITEL ----------------
+    xls = pd.ExcelFile(giro_path)
+    giro_sheet = None
+    notas_sheet = None
+    for sh in xls.sheet_names:
+        probe = strip_cols(pd.read_excel(xls, sheet_name=sh, nrows=3))
+        norms = {colnorm(c) for c in probe.columns}
+        if {"CÓDIGO", "CMV", "VLR ESTOQUE"}.issubset(norms):
+            giro_sheet = sh
+        if "NR_CNPJ_EMITENTE" in norms:
+            notas_sheet = sh
+    if giro_sheet is None:
+        raise ValueError(f"GIRO E NOTAS: não encontrei aba com CÓDIGO, CMV e VLR ESTOQUE. Abas: {xls.sheet_names}")
 
-    # ---- SELLOUT ----
-    if df_sellout is not None:
-        col_so_fat = find_col(df_sellout, "FATURAMENTO")
-        col_so_forn = (
-            find_col(df_sellout, "FORNECEDOR")
-            or find_col(df_sellout, "NM FORNECEDOR")
-            or find_col(df_sellout, "NM_FORNECEDOR")
-            or find_col(df_sellout, "EMITENTE")
-            or find_col(df_sellout, "CLIENTE")
-        )
-        col_so_marca = find_col(df_sellout, "MARCA")
-        col_so_linha = find_col(df_sellout, "LINHA")
+    giro = strip_cols(pd.read_excel(xls, sheet_name=giro_sheet))
+    c_g_cod = find_col(giro, "CÓDIGO") or find_col(giro, "CODIGO")
+    c_g_desc = find_col(giro, "DESCRIÇÃO DO ITEM") or find_col(giro, "DESCRICAO DO ITEM")
+    c_g_marca = find_col(giro, "MARCA")
+    c_g_cmv = find_col(giro, "CMV")
+    c_g_est = find_col(giro, "VLR ESTOQUE") or find_col(giro, "VLR_ESTOQUE")
+    c_g_mes = find_col(giro, "MÊS") or find_col(giro, "MES")
+    if not all([c_g_cod, c_g_cmv, c_g_est]):
+        raise ValueError(f"GIRO: colunas obrigatórias ausentes. Colunas: {list(giro.columns)}")
+    giro["COD_KEY"] = giro[c_g_cod].map(product_key)
+    giro = giro.merge(prod_lookup, on="COD_KEY", how="left")
+    giro["MARCA"] = giro[c_g_marca].fillna("").astype(str).str.strip() if c_g_marca else giro["MARCA_PROD"]
+    giro["LINHA"] = giro["LINHA_PROD"].fillna("").astype(str).str.strip()
+    giro["FORNECEDOR_CMV"] = [canonical_supplier(n, m) for n, m in zip(giro["FORNECEDOR_PROD"], giro["MARCA"])]
+    giro["FORN_KEY"] = giro["FORNECEDOR_CMV"].map(supplier_key)
+    giro["CMV_VALOR"] = parse_number_br(giro[c_g_cmv])
+    giro["ESTOQUE_VALOR"] = parse_number_br(giro[c_g_est])
+    giro["MES_NUM"] = giro[c_g_mes].map(parse_mes_to_num) if c_g_mes else pd.NA
+    df_cmv = giro
 
-        col_so_mes = find_col(df_sellout, "MÊS") or find_col(df_sellout, "MES")
-        col_so_ano = find_col(df_sellout, "ANO")
-        col_so_data = find_col(df_sellout, "DATA") or find_col(df_sellout, "DT") or find_col(df_sellout, "DT_VENDA")
+    df_citel = empty_citel()
+    if notas_sheet is not None:
+        notas = strip_cols(pd.read_excel(xls, sheet_name=notas_sheet))
+        c_n_cnpj = find_col(notas, "NR_CNPJ_EMITENTE")
+        c_n_val = find_col(notas, "VL_NOTA_FISCAL") or find_col(notas, "VALOR NOTA") or find_col(notas, "VR. CONTÁBIL")
+        c_n_dt = find_col(notas, "DT_EMISSAO") or find_col(notas, "DATA")
+        c_n_doc = find_col(notas, "NR_DOCUMENTO") or find_col(notas, "DOCUMENTO") or find_col(notas, "NR NOTA FISCAL")
+        if all([c_n_cnpj, c_n_val, c_n_dt, c_n_doc]):
+            notas["CNPJ_KEY"] = notas[c_n_cnpj].map(only_digits)
+            notas["FORNECEDOR_CITEL"] = notas["CNPJ_KEY"].map(cnpj_to_supplier).fillna("CNPJ NÃO CADASTRADO")
+            notas["FORN_KEY"] = notas["FORNECEDOR_CITEL"].map(build_supplier_key)
+            notas["COMPRA_VALOR"] = parse_number_br(notas[c_n_val])
+            notas["DATA_DT"] = to_datetime_safe(notas[c_n_dt])
+            notas["ANO"] = notas["DATA_DT"].dt.year
+            notas["MES_NUM"] = notas["DATA_DT"].dt.month
+            notas["NR_DOCUMENTO"] = notas[c_n_doc]
+            notas["NOTA_KEY"] = notas["NR_DOCUMENTO"].map(nota_key)
+            df_citel = notas
 
-        col_so_cod = find_col(df_sellout, "CÓDIGO") or find_col(df_sellout, "CODIGO")
-        col_so_desc_prod = (
-            find_col(df_sellout, "DESCRIÇÃO DO PRODUTO")
-            or find_col(df_sellout, "DESCRICAO DO PRODUTO")
-            or find_col(df_sellout, "DESCRIÇÃO PRODUTO")
-            or find_col(df_sellout, "DESCRICAO PRODUTO")
-        )
-        col_so_qtd = (
-            find_col(df_sellout, "QTD. FATUR")
-            or find_col(df_sellout, "QTD FATUR")
-            or find_col(df_sellout, "QTDE FATUR")
-            or find_col(df_sellout, "QUANTIDADE")
-        )
+    # ---------------- NOTAS DE ENTRADA ANALÍTICAS ----------------
+    ent = read_report_csv(entradas_path, ("DOCUMENTO", "FORNECEDOR", "VR. CONTÁBIL"))
+    c_e_doc = find_col(ent, "DOCUMENTO")
+    c_e_forn = find_col(ent, "FORNECEDOR")
+    c_e_data = find_col(ent, "DATA")
+    c_e_cod = find_col(ent, "CÓDIGO") or find_col(ent, "CODIGO")
+    c_e_marca = find_col(ent, "MARCA")
+    c_e_val = find_col(ent, "VR. CONTÁBIL") or find_col(ent, "VR CONTABIL")
+    if not all([c_e_doc, c_e_forn, c_e_data, c_e_val]):
+        raise ValueError(f"NOTAS DE ENTRADA: colunas obrigatórias ausentes. Colunas: {list(ent.columns)}")
+    ent["COD_KEY"] = ent[c_e_cod].map(product_key) if c_e_cod else ""
+    ent = ent.merge(prod_lookup[["COD_KEY", "LINHA_PROD"]], on="COD_KEY", how="left")
+    ent["MARCA"] = ent[c_e_marca].fillna("").astype(str).str.strip() if c_e_marca else ""
+    ent["FORNECEDOR_ENT"] = [canonical_supplier(n, m) for n, m in zip(ent[c_e_forn], ent["MARCA"])]
+    ent["FORN_KEY"] = ent["FORNECEDOR_ENT"].map(supplier_key)
+    ent["VR_CONTABIL"] = parse_number_br(ent[c_e_val])
+    ent["NR_NOTA_FISCAL"] = ent[c_e_doc]
+    ent["NOTA_KEY"] = ent["NR_NOTA_FISCAL"].map(nota_key)
+    ent["LINHA"] = ent["LINHA_PROD"].fillna("").astype(str).str.strip()
+    ent["GRUPO"] = ""
+    ent["DATA_DT"] = to_datetime_safe(ent[c_e_data])
+    ent["ANO"] = ent["DATA_DT"].dt.year
+    ent["MES_NUM"] = ent["DATA_DT"].dt.month
+    df_ent = ent
 
-        if col_so_fat is None:
-            raise ValueError(f"SELLOUT: não encontrei FATURAMENTO. Colunas: {list(df_sellout.columns)}")
-        if col_so_forn is None:
-            raise ValueError(f"SELLOUT: não encontrei FORNECEDOR. Colunas: {list(df_sellout.columns)}")
-        if col_so_mes is None and col_so_data is None:
-            raise ValueError(
-                f"SELLOUT: não encontrei coluna MÊS/MES nem DATA. "
-                f"Confira se o nome está exatamente 'MÊS'. Colunas: {list(df_sellout.columns)}"
-            )
+    # ---------------- SELLOUT ----------------
+    so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"))
+    c_s_cod = find_col(so, "CÓDIGO") or find_col(so, "CODIGO")
+    c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
+    c_s_fat = find_col(so, "FATURAMENTO")
+    c_s_qtd = find_col(so, "QTD. FATUR") or find_col(so, "QTD FATUR")
+    if not all([c_s_cod, c_s_fat]):
+        raise ValueError(f"SELLOUT: colunas obrigatórias ausentes. Colunas: {list(so.columns)}")
+    so["COD_KEY"] = so[c_s_cod].map(product_key)
+    so = so.merge(prod_lookup, on="COD_KEY", how="left")
+    so["MARCA"] = so["MARCA_PROD"].fillna("").astype(str).str.strip()
+    so["FORNECEDOR_SELLOUT"] = [canonical_supplier(n, m) for n, m in zip(so["FORNECEDOR_PROD"], so["MARCA"])]
+    so["FORN_KEY"] = so["FORNECEDOR_SELLOUT"].map(supplier_key)
+    so["LINHA"] = so["LINHA_PROD"].fillna("").astype(str).str.strip()
+    so["FATURAMENTO"] = parse_number_br(so[c_s_fat])
+    so["QTD_FATUR"] = parse_number_br(so[c_s_qtd]) if c_s_qtd else 0.0
+    so["CODIGO"] = so["COD_KEY"]
+    so["DESCRICAO_PRODUTO"] = so[c_s_desc].fillna("").astype(str).str.strip() if c_s_desc else ""
 
-        df_sellout = df_sellout.copy()
-        df_sellout["FATURAMENTO"] = to_float(df_sellout[col_so_fat])
-        df_sellout["FORNECEDOR_SELLOUT"] = df_sellout[col_so_forn].astype(str).fillna("").str.strip()
-        df_sellout["FORN_KEY"] = df_sellout["FORNECEDOR_SELLOUT"].map(supplier_key)
-        df_sellout["MARCA"] = df_sellout[col_so_marca].astype(str).fillna("").str.strip() if col_so_marca else ""
-        df_sellout["LINHA"] = df_sellout[col_so_linha].astype(str).fillna("").str.strip() if col_so_linha else ""
-
-        df_sellout["CODIGO"] = df_sellout[col_so_cod].astype(str).fillna("").str.strip() if col_so_cod else ""
-        df_sellout["DESCRICAO_PRODUTO"] = df_sellout[col_so_desc_prod].astype(str).fillna("").str.strip() if col_so_desc_prod else ""
-        df_sellout["QTD_FATUR"] = to_float(df_sellout[col_so_qtd]) if col_so_qtd else 0.0
-
-        df_sellout["DATA_DT"] = pd.NaT
-        df_sellout["MES_NUM"] = pd.NA
-        df_sellout["ANO"] = pd.NA
-
-        if col_so_data is not None:
-            df_sellout["DATA_DT"] = to_datetime_safe(df_sellout[col_so_data])
-            if df_sellout["DATA_DT"].notna().any():
-                df_sellout["MES_NUM"] = df_sellout["DATA_DT"].dt.month
-                df_sellout["ANO"] = df_sellout["DATA_DT"].dt.year
-
-        if col_so_mes is not None:
-            df_sellout["MES_NUM"] = df_sellout[col_so_mes].map(parse_mes_to_num)
-
-        if col_so_ano is not None:
-            df_sellout["ANO"] = pd.to_numeric(df_sellout[col_so_ano], errors="coerce")
+    # Período do relatório de sellout, extraído do cabeçalho do arquivo.
+    text = open(sellout_path, "r", encoding="latin1", errors="ignore").read()[:8000]
+    mi = re.search(r"Data Inicial \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    mf = re.search(r"Data Final \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    data_ref = pd.to_datetime(mf.group(1), dayfirst=True) if mf else (pd.to_datetime(mi.group(1), dayfirst=True) if mi else pd.NaT)
+    so["DATA_DT"] = data_ref
+    so["ANO"] = data_ref.year if pd.notna(data_ref) else pd.NA
+    so["MES_NUM"] = data_ref.month if pd.notna(data_ref) else pd.NA
+    df_sellout = so
 
     return df_cmv, df_citel, df_ent, df_sellout
 
 
 try:
-    df_cmv, df_citel, df_ent, df_sellout = load_data(EXCEL_PATH)
+    df_cmv, df_citel, df_ent, df_sellout = load_data(
+        GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
+        SELLOUT_PATH, NOTAS_ENTRADA_PATH
+    )
 except Exception as e:
-    st.error(f"Erro ao ler '{EXCEL_PATH}': {e}")
+    st.error(f"Erro ao carregar as bases: {e}")
     st.stop()
 
 
@@ -405,6 +449,9 @@ df_sellout_f = apply_month_year_filter(df_sellout, apply_year=True, apply_month=
 # -----------------------------
 def render_compras_page():
     st.title("INDICADORES DE COMPRAS")
+
+    if df_citel.empty:
+        st.warning("A planilha GIRO E NOTAS atual não possui uma aba com NR_CNPJ_EMITENTE. Os indicadores de Compras CITEL ficarão zerados até essa aba ser incluída; CMV, estoque, entradas e sellout continuam disponíveis.")
 
     # Resumo geral do período selecionado
     total_compras_citel = float(df_citel_f["COMPRA_VALOR"].sum())
