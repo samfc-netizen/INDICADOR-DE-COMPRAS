@@ -6,8 +6,8 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-17.6 — Competência mensal real do Sellout"
-FILTER_STATE_VERSION = "sellout-mensal-v1"
+APP_VERSION = "2026-07-17.7 — Ano do Sellout alinhado às bases"
+FILTER_STATE_VERSION = "sellout-mensal-v2"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -599,17 +599,20 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
 
     if c_s_ano:
         so["ANO"] = pd.to_numeric(so[c_s_ano], errors="coerce").astype("Int64")
-    elif pd.notna(data_ref):
-        so["ANO"] = data_ref.year
-    else:
-        # Exportações mensais simplificadas podem não repetir o ano. Nesse caso,
-        # usa a competência mais recente das notas/entradas do mesmo carregamento.
+    elif c_s_mes:
+        # Ao existir detalhamento mensal, o ano deve acompanhar as demais bases
+        # do carregamento. O cabeçalho pode guardar uma data antiga do relatório
+        # original e não deve eliminar todo o Sellout no filtro do ano atual.
         anos_referencia = pd.concat([
             df_citel["ANO"] if "ANO" in df_citel.columns else pd.Series(dtype=float),
             df_ent["ANO"] if "ANO" in df_ent.columns else pd.Series(dtype=float),
         ]).dropna()
-        ano_referencia = int(anos_referencia.max()) if not anos_referencia.empty else pd.NA
+        ano_referencia = int(anos_referencia.max()) if not anos_referencia.empty else (data_ref.year if pd.notna(data_ref) else pd.NA)
         so["ANO"] = ano_referencia
+    elif pd.notna(data_ref):
+        so["ANO"] = data_ref.year
+    else:
+        so["ANO"] = pd.NA
 
     so["DATA_DT"] = pd.to_datetime(
         {"year": pd.to_numeric(so["ANO"], errors="coerce"),
@@ -1127,6 +1130,23 @@ def render_sellout_page():
 
     if df_sellout_f.empty:
         st.info("Sem dados em SELLOUT no recorte selecionado.")
+        anos_detectados = sorted(df_sellout["ANO"].dropna().astype(int).unique().tolist()) if "ANO" in df_sellout.columns else []
+        meses_detectados_num = sorted(df_sellout["MES_NUM"].dropna().astype(int).unique().tolist()) if "MES_NUM" in df_sellout.columns else []
+        meses_detectados = [MESES_LABELS[m - 1] for m in meses_detectados_num if 1 <= m <= 12]
+        st.warning(
+            "Diagnóstico do Sellout — "
+            f"linhas carregadas: {len(df_sellout):,}; "
+            f"anos reconhecidos: {anos_detectados or 'nenhum'}; "
+            f"meses reconhecidos: {', '.join(meses_detectados) or 'nenhum'}; "
+            f"filtro de ano aplicado: {sel_anos or 'todos'}; "
+            f"filtro de mês aplicado: {sel_meses or 'todos'}."
+        )
+        if st.button("Restaurar filtros e exibir Sellout", key="reset_filtros_sellout"):
+            st.session_state["filtro_anos_aplicado"] = anos
+            st.session_state["filtro_meses_aplicado"] = MESES_LABELS
+            st.session_state.pop("filtro_anos_input", None)
+            st.session_state.pop("filtro_meses_input", None)
+            st.rerun()
         return
 
     # Resumo: Sellout x CMV por fornecedor
