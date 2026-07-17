@@ -14,6 +14,9 @@ CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
 SELLOUT_PATH = "sellout.csv"
 NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
 
+# Itens administrativos/serviços que não devem compor os indicadores comerciais.
+EXCLUDED_PRODUCT_KEYS = {"22940"}  # PRESTAÇÃO DE SERVIÇOS
+
 MESES_PT = {
     "JANEIRO": 1, "FEVEREIRO": 2, "MARÇO": 3, "MARCO": 3, "ABRIL": 4, "MAIO": 5, "JUNHO": 6,
     "JULHO": 7, "AGOSTO": 8, "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12
@@ -399,6 +402,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     if not all([c_g_cod, c_g_cmv, c_g_est]):
         raise ValueError(f"GIRO: colunas obrigatórias ausentes. Colunas: {list(giro.columns)}")
     giro["COD_KEY"] = giro[c_g_cod].map(product_key)
+    giro = giro[~giro["COD_KEY"].isin(EXCLUDED_PRODUCT_KEYS)].copy()
     giro = giro.merge(prod_lookup, on="COD_KEY", how="left")
     giro["MARCA"] = giro[c_g_marca].fillna("").astype(str).str.strip() if c_g_marca else giro["MARCA_PROD"]
     giro["DESCRICAO_ITEM"] = giro[c_g_desc].fillna("").astype(str).str.strip() if c_g_desc else ""
@@ -459,6 +463,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     if not all([c_e_doc, c_e_forn, c_e_data, c_e_val]):
         raise ValueError(f"NOTAS DE ENTRADA: colunas obrigatórias ausentes. Colunas: {list(ent.columns)}")
     ent["COD_KEY"] = ent[c_e_cod].map(product_key) if c_e_cod else ""
+    ent = ent[~ent["COD_KEY"].isin(EXCLUDED_PRODUCT_KEYS)].copy()
     ent = ent.merge(prod_lookup[["COD_KEY", "LINHA_PROD"]], on="COD_KEY", how="left")
     ent["MARCA"] = ent[c_e_marca].fillna("").astype(str).str.strip() if c_e_marca else ""
     ent["DESCRICAO_ITEM"] = ent[c_e_desc].fillna("").astype(str).str.strip() if c_e_desc else ""
@@ -552,6 +557,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     if not all([c_s_cod, c_s_fat]):
         raise ValueError(f"SELLOUT: colunas obrigatórias ausentes. Colunas: {list(so.columns)}")
     so["COD_KEY"] = so[c_s_cod].map(product_key)
+    so = so[~so["COD_KEY"].isin(EXCLUDED_PRODUCT_KEYS)].copy()
     so = so.merge(prod_lookup, on="COD_KEY", how="left")
     so["MARCA"] = so["MARCA_PROD"].fillna("").astype(str).str.strip()
     so["DESCRICAO_PRODUTO"] = so[c_s_desc].fillna("").astype(str).str.strip() if c_s_desc else ""
