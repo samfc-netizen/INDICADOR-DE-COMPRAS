@@ -3,9 +3,11 @@ import streamlit as st
 import plotly.express as px
 import re
 import unicodedata
+import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
 APP_VERSION = "2026-07-17.6 — Competência mensal real do Sellout"
+FILTER_STATE_VERSION = "sellout-mensal-v1"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -343,7 +345,7 @@ def empty_citel():
 
 
 @st.cache_data(show_spinner=False)
-def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str):
+def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str, cache_token=None):
     # ---------------- CADASTROS ----------------
     cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."))
     c_cnpj = find_col(cad_forn, "C.P.F./C.N.P.J.") or find_col(cad_forn, "CPF/CNPJ")
@@ -621,9 +623,18 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
 
 
 try:
+    # O token por data/tamanho invalida o cache quando qualquer arquivo é
+    # substituído, mesmo que permaneça com exatamente o mesmo nome/caminho.
+    arquivos_origem = [
+        GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
+        SELLOUT_PATH, NOTAS_ENTRADA_PATH,
+    ]
+    cache_token = tuple(
+        (os.path.getmtime(path), os.path.getsize(path)) for path in arquivos_origem
+    )
     df_cmv, df_citel, df_ent, df_sellout = load_data(
         GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
-        SELLOUT_PATH, NOTAS_ENTRADA_PATH
+        SELLOUT_PATH, NOTAS_ENTRADA_PATH, cache_token
     )
 except Exception as e:
     st.error(f"Erro ao carregar as bases: {e}")
@@ -646,6 +657,21 @@ if df_sellout is not None and "ANO" in df_sellout.columns and df_sellout["ANO"].
     anos_sellout = sorted(df_sellout["ANO"].dropna().astype(int).unique().tolist())
 
 anos = sorted(set(anos_citel + anos_ent + anos_sellout))
+
+# A introdução da competência mensal mudou o significado do filtro do Sellout.
+# Limpa uma única vez seleções antigas persistidas na sessão do Streamlit.
+if st.session_state.get("filter_state_version") != FILTER_STATE_VERSION:
+    st.session_state["filter_state_version"] = FILTER_STATE_VERSION
+    st.session_state["filtro_anos_aplicado"] = anos
+    st.session_state["filtro_meses_aplicado"] = MESES_LABELS
+    st.session_state.pop("filtro_anos_input", None)
+    st.session_state.pop("filtro_meses_input", None)
+
+# Também remove opções que deixaram de existir após a troca dos arquivos.
+anos_aplicados = st.session_state.get("filtro_anos_aplicado", anos)
+st.session_state["filtro_anos_aplicado"] = [x for x in anos_aplicados if x in anos]
+meses_aplicados = st.session_state.get("filtro_meses_aplicado", MESES_LABELS)
+st.session_state["filtro_meses_aplicado"] = [x for x in meses_aplicados if x in MESES_LABELS]
 # Os filtros globais ficam dentro de um formulário para evitar que cada clique
 # provoque a reconstrução completa de todas as tabelas e gráficos.
 with st.sidebar.form("form_filtros_globais", clear_on_submit=False):
