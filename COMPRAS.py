@@ -5,7 +5,7 @@ import re
 import unicodedata
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-17.4 — Conciliação DOCUMENTO x NR_DOCUMENTO"
+APP_VERSION = "2026-07-17.5 — Divisões comerciais e fornecedores sem identificação"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -272,7 +272,7 @@ def canonical_supplier(name, brand="") -> str:
     raw = re.sub(r"[^A-Z0-9À-Ü]+", " ", raw)
     raw = " ".join(raw.split())
 
-    if brand_n in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}:
+    if any(marca in brand_n for marca in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}):
         return "AKZO NOBEL AUTO"
     if any(marca in brand_n for marca in {"CORAL", "MACTRA", "HAMMERITE", "CETOL", "SPARLACK"}):
         return "AKZO NOBEL DECOR"
@@ -287,6 +287,45 @@ def canonical_supplier(name, brand="") -> str:
     if "AKZO" in raw and "NOBEL" in raw:
         return "AKZO NOBEL"
     return raw
+
+
+def supplier_division(name, brand="") -> str:
+    """Classificação comercial única, usada por todas as fontes do dashboard."""
+    supplier = canonical_supplier(name, brand)
+    brand_n = "" if pd.isna(brand) else str(brand).upper().strip()
+
+    if supplier in {"AKZO NOBEL AUTO", "AKZO NOBEL DECOR"}:
+        return supplier
+    if supplier == "AKZO NOBEL":
+        if any(x in brand_n for x in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}):
+            return "AKZO NOBEL AUTO"
+        if any(x in brand_n for x in {"CORAL", "MACTRA", "HAMMERITE", "CETOL", "SPARLACK", "ALABASTINE"}):
+            return "AKZO NOBEL DECOR"
+        # Itens auxiliares sem marca (balança/espectrofotômetro) pertencem ao
+        # fluxo automotivo; nunca mantemos o agrupador genérico no dashboard.
+        return "AKZO NOBEL AUTO"
+
+    if supplier in {"SAINT GOBAIN NORTON", "SAINT GOBAIN TEK BOND"}:
+        return supplier
+    if supplier == "SAINT GOBAIN":
+        if "NORTON" in brand_n:
+            return "SAINT GOBAIN NORTON"
+        if "TEK BOND" in brand_n or "TEKBOND" in brand_n:
+            return "SAINT GOBAIN TEK BOND"
+        # Norton é a divisão padrão quando o cadastro antigo não informa marca.
+        return "SAINT GOBAIN NORTON"
+
+    return supplier
+
+
+def supplier_family(name) -> str:
+    """Família usada para conciliar a NF do CITEL com as divisões das entradas."""
+    supplier = canonical_supplier(name)
+    if supplier.startswith("AKZO NOBEL"):
+        return "AKZO NOBEL"
+    if supplier.startswith("SAINT GOBAIN"):
+        return "SAINT GOBAIN"
+    return supplier
 
 
 def build_supplier_key(name, brand="") -> str:
@@ -362,8 +401,11 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     giro["COD_KEY"] = giro[c_g_cod].map(product_key)
     giro = giro.merge(prod_lookup, on="COD_KEY", how="left")
     giro["MARCA"] = giro[c_g_marca].fillna("").astype(str).str.strip() if c_g_marca else giro["MARCA_PROD"]
+    giro["DESCRICAO_ITEM"] = giro[c_g_desc].fillna("").astype(str).str.strip() if c_g_desc else ""
     giro["LINHA"] = giro["LINHA_PROD"].fillna("").astype(str).str.strip()
-    giro["FORNECEDOR_CMV"] = [canonical_supplier(n, m) for n, m in zip(giro["FORNECEDOR_PROD"], giro["MARCA"])]
+    giro_hint = giro["MARCA"].fillna("").astype(str) + " " + giro["DESCRICAO_ITEM"].fillna("").astype(str)
+    giro["FORNECEDOR_CMV"] = [supplier_division(n, h) for n, h in zip(giro["FORNECEDOR_PROD"], giro_hint)]
+    giro["FORNECEDOR_CMV"] = giro["FORNECEDOR_CMV"].replace("", "FORNECEDOR NÃO IDENTIFICADO").fillna("FORNECEDOR NÃO IDENTIFICADO")
     giro["FORN_KEY"] = giro["FORNECEDOR_CMV"].map(supplier_key)
     giro["CMV_VALOR"] = parse_number_br(giro[c_g_cmv])
     giro["ESTOQUE_VALOR"] = parse_number_br(giro[c_g_est])
@@ -395,7 +437,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
             notas.loc[por_cnpj.isna() & por_nome_cadastro.notna(), "METODO_IDENTIFICACAO"] = "NOME/CADASTRO"
             notas.loc[por_cnpj.isna() & por_nome_cadastro.isna() & nome_da_nota.notna(), "METODO_IDENTIFICACAO"] = "NOME DA NF"
 
-            notas["FORNECEDOR_CITEL"] = fornecedor_base.map(canonical_supplier).fillna("FORNECEDOR NÃO IDENTIFICADO")
+            notas["FORNECEDOR_CITEL"] = fornecedor_base.map(canonical_supplier).replace("", "FORNECEDOR NÃO IDENTIFICADO").fillna("FORNECEDOR NÃO IDENTIFICADO")
             notas["FORN_KEY"] = notas["FORNECEDOR_CITEL"].map(supplier_key)
             notas["COMPRA_VALOR"] = parse_number_br(notas[c_n_val])
             notas["DATA_DT"] = to_datetime_safe(notas[c_n_dt])
@@ -411,6 +453,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     c_e_forn = find_col(ent, "FORNECEDOR")
     c_e_data = find_col(ent, "DATA")
     c_e_cod = find_col(ent, "CÓDIGO") or find_col(ent, "CODIGO")
+    c_e_desc = find_col(ent, "DESCRIÇÃO DO ITEM") or find_col(ent, "DESCRICAO DO ITEM")
     c_e_marca = find_col(ent, "MARCA")
     c_e_val = find_col(ent, "VR. CONTÁBIL") or find_col(ent, "VR CONTABIL")
     if not all([c_e_doc, c_e_forn, c_e_data, c_e_val]):
@@ -418,7 +461,9 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     ent["COD_KEY"] = ent[c_e_cod].map(product_key) if c_e_cod else ""
     ent = ent.merge(prod_lookup[["COD_KEY", "LINHA_PROD"]], on="COD_KEY", how="left")
     ent["MARCA"] = ent[c_e_marca].fillna("").astype(str).str.strip() if c_e_marca else ""
-    ent["FORNECEDOR_ENT"] = [canonical_supplier(n, m) for n, m in zip(ent[c_e_forn], ent["MARCA"])]
+    ent["DESCRICAO_ITEM"] = ent[c_e_desc].fillna("").astype(str).str.strip() if c_e_desc else ""
+    ent_hint = ent["MARCA"].fillna("").astype(str) + " " + ent["DESCRICAO_ITEM"].fillna("").astype(str)
+    ent["FORNECEDOR_ENT"] = [supplier_division(n, h) for n, h in zip(ent[c_e_forn], ent_hint)]
     ent["FORN_KEY"] = ent["FORNECEDOR_ENT"].map(supplier_key)
     ent["VR_CONTABIL"] = parse_number_br(ent[c_e_val])
     ent["NR_NOTA_FISCAL"] = ent[c_e_doc]
@@ -430,9 +475,77 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     ent["MES_NUM"] = ent["DATA_DT"].dt.month
     df_ent = ent
 
+    # As notas do CITEL não possuem item/marca. Para aplicar as mesmas divisões
+    # comerciais, distribui o valor de cada NF conforme as linhas analíticas da
+    # mesma nota em ENTRADAS. O rateio preserva exatamente o total original.
+    if not df_citel.empty:
+        df_citel["FAMILIA_FORNECEDOR"] = df_citel["FORNECEDOR_CITEL"].map(supplier_family)
+        df_ent["FAMILIA_FORNECEDOR"] = df_ent["FORNECEDOR_ENT"].map(supplier_family)
+
+        divisoes = {
+            "AKZO NOBEL AUTO", "AKZO NOBEL DECOR",
+            "SAINT GOBAIN NORTON", "SAINT GOBAIN TEK BOND",
+        }
+        rateio = (
+            df_ent[df_ent["FORNECEDOR_ENT"].isin(divisoes) & (df_ent["NOTA_KEY"] != "")]
+            .groupby(["NOTA_KEY", "FAMILIA_FORNECEDOR", "FORNECEDOR_ENT"], as_index=False)
+            .agg(VALOR_DIVISAO=("VR_CONTABIL", "sum"))
+        )
+        if not rateio.empty:
+            totais_rateio = (
+                rateio.groupby(["NOTA_KEY", "FAMILIA_FORNECEDOR"])["VALOR_DIVISAO"]
+                .transform("sum")
+            )
+            rateio["PESO_DIVISAO"] = rateio["VALOR_DIVISAO"] / totais_rateio.where(totais_rateio != 0, 1.0)
+            rateio = rateio.rename(columns={"FORNECEDOR_ENT": "DIVISAO_CITEL"})
+
+            citel_rateado = df_citel.merge(
+                rateio[["NOTA_KEY", "FAMILIA_FORNECEDOR", "DIVISAO_CITEL", "PESO_DIVISAO"]],
+                on=["NOTA_KEY", "FAMILIA_FORNECEDOR"], how="left"
+            )
+            citel_rateado["COMPRA_VALOR"] = (
+                citel_rateado["COMPRA_VALOR"] * citel_rateado["PESO_DIVISAO"].fillna(1.0)
+            )
+            citel_rateado["FORNECEDOR_CITEL"] = (
+                citel_rateado["DIVISAO_CITEL"].fillna(citel_rateado["FORNECEDOR_CITEL"])
+            )
+            citel_rateado["FORN_KEY"] = citel_rateado["FORNECEDOR_CITEL"].map(supplier_key)
+            df_citel = citel_rateado.drop(columns=["DIVISAO_CITEL", "PESO_DIVISAO"])
+
+        # Notas sem correspondência direta em ENTRADAS são distribuídas pela
+        # composição real da respectiva família. Isso impede grupos genéricos
+        # sem inventar valor e mantém o total do CITEL inalterado.
+        genericos = {"AKZO NOBEL", "SAINT GOBAIN"}
+        mask_generico = df_citel["FORNECEDOR_CITEL"].isin(genericos)
+        if mask_generico.any():
+            pesos_familia = (
+                df_ent[df_ent["FORNECEDOR_ENT"].isin(divisoes)]
+                .groupby(["FAMILIA_FORNECEDOR", "FORNECEDOR_ENT"], as_index=False)
+                .agg(VALOR_DIVISAO=("VR_CONTABIL", "sum"))
+            )
+            if not pesos_familia.empty:
+                totais_familia = pesos_familia.groupby("FAMILIA_FORNECEDOR")["VALOR_DIVISAO"].transform("sum")
+                pesos_familia["PESO_FAMILIA"] = pesos_familia["VALOR_DIVISAO"] / totais_familia.where(totais_familia != 0, 1.0)
+                pesos_familia = pesos_familia.rename(columns={"FORNECEDOR_ENT": "DIVISAO_FALLBACK"})
+
+                citel_ok = df_citel[~mask_generico].copy()
+                citel_fallback = df_citel[mask_generico].merge(
+                    pesos_familia[["FAMILIA_FORNECEDOR", "DIVISAO_FALLBACK", "PESO_FAMILIA"]],
+                    on="FAMILIA_FORNECEDOR", how="left"
+                )
+                tem_fallback = citel_fallback["DIVISAO_FALLBACK"].notna()
+                citel_fallback.loc[tem_fallback, "COMPRA_VALOR"] *= citel_fallback.loc[tem_fallback, "PESO_FAMILIA"]
+                citel_fallback.loc[tem_fallback, "FORNECEDOR_CITEL"] = citel_fallback.loc[tem_fallback, "DIVISAO_FALLBACK"]
+                citel_fallback["FORN_KEY"] = citel_fallback["FORNECEDOR_CITEL"].map(supplier_key)
+                df_citel = pd.concat([
+                    citel_ok,
+                    citel_fallback.drop(columns=["DIVISAO_FALLBACK", "PESO_FAMILIA"])
+                ], ignore_index=True)
+
     # ---------------- SELLOUT ----------------
     so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"))
     c_s_cod = find_col(so, "CÓDIGO") or find_col(so, "CODIGO")
+    c_s_forn = find_col(so, "FORNECEDOR")
     c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
     c_s_fat = find_col(so, "FATURAMENTO")
     c_s_qtd = find_col(so, "QTD. FATUR") or find_col(so, "QTD FATUR")
@@ -441,13 +554,26 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     so["COD_KEY"] = so[c_s_cod].map(product_key)
     so = so.merge(prod_lookup, on="COD_KEY", how="left")
     so["MARCA"] = so["MARCA_PROD"].fillna("").astype(str).str.strip()
-    so["FORNECEDOR_SELLOUT"] = [canonical_supplier(n, m) for n, m in zip(so["FORNECEDOR_PROD"], so["MARCA"])]
+    so["DESCRICAO_PRODUTO"] = so[c_s_desc].fillna("").astype(str).str.strip() if c_s_desc else ""
+    sellout_hint = so["MARCA"] + " " + so["DESCRICAO_PRODUTO"]
+    fornecedor_prod = so["FORNECEDOR_PROD"].fillna("").astype(str).str.strip()
+    fornecedor_relatorio = so[c_s_forn].fillna("").astype(str).str.strip() if c_s_forn else pd.Series("", index=so.index)
+    fornecedor_base_so = fornecedor_prod.where(fornecedor_prod != "", fornecedor_relatorio)
+    so["FORNECEDOR_SELLOUT"] = [supplier_division(n, h) for n, h in zip(fornecedor_base_so, sellout_hint)]
+    # Segunda chance: alguns cadastros têm fornecedor inválido, embora o relatório
+    # de Sellout possua o agrupamento correto na própria linha.
+    vazios_so = so["FORNECEDOR_SELLOUT"].fillna("").astype(str).str.strip() == ""
+    if vazios_so.any():
+        so.loc[vazios_so, "FORNECEDOR_SELLOUT"] = [
+            supplier_division(n, m)
+            for n, m in zip(fornecedor_relatorio.loc[vazios_so], sellout_hint.loc[vazios_so])
+        ]
+    so["FORNECEDOR_SELLOUT"] = so["FORNECEDOR_SELLOUT"].replace("", "FORNECEDOR NÃO IDENTIFICADO").fillna("FORNECEDOR NÃO IDENTIFICADO")
     so["FORN_KEY"] = so["FORNECEDOR_SELLOUT"].map(supplier_key)
     so["LINHA"] = so["LINHA_PROD"].fillna("").astype(str).str.strip()
     so["FATURAMENTO"] = parse_number_br(so[c_s_fat])
     so["QTD_FATUR"] = parse_number_br(so[c_s_qtd]) if c_s_qtd else 0.0
     so["CODIGO"] = so["COD_KEY"]
-    so["DESCRICAO_PRODUTO"] = so[c_s_desc].fillna("").astype(str).str.strip() if c_s_desc else ""
 
     # Período do relatório de sellout, extraído do cabeçalho do arquivo.
     text = open(sellout_path, "r", encoding="latin1", errors="ignore").read()[:8000]
