@@ -5,7 +5,7 @@ import re
 import unicodedata
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-17.5 — Divisões comerciais e fornecedores sem identificação"
+APP_VERSION = "2026-07-17.6 — Competência mensal real do Sellout"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -554,6 +554,8 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
     c_s_fat = find_col(so, "FATURAMENTO")
     c_s_qtd = find_col(so, "QTD. FATUR") or find_col(so, "QTD FATUR")
+    c_s_mes = find_col(so, "MÊS") or find_col(so, "MES")
+    c_s_ano = find_col(so, "ANO")
     if not all([c_s_cod, c_s_fat]):
         raise ValueError(f"SELLOUT: colunas obrigatórias ausentes. Colunas: {list(so.columns)}")
     so["COD_KEY"] = so[c_s_cod].map(product_key)
@@ -581,14 +583,38 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     so["QTD_FATUR"] = parse_number_br(so[c_s_qtd]) if c_s_qtd else 0.0
     so["CODIGO"] = so["COD_KEY"]
 
-    # Período do relatório de sellout, extraído do cabeçalho do arquivo.
+    # Competência do Sellout. Quando existe a coluna MÊS, ela prevalece sobre
+    # o período geral do cabeçalho e permite os filtros/históricos mensais reais.
     text = open(sellout_path, "r", encoding="latin1", errors="ignore").read()[:8000]
     mi = re.search(r"Data Inicial \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
     mf = re.search(r"Data Final \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
     data_ref = pd.to_datetime(mf.group(1), dayfirst=True) if mf else (pd.to_datetime(mi.group(1), dayfirst=True) if mi else pd.NaT)
-    so["DATA_DT"] = data_ref
-    so["ANO"] = data_ref.year if pd.notna(data_ref) else pd.NA
-    so["MES_NUM"] = data_ref.month if pd.notna(data_ref) else pd.NA
+
+    if c_s_mes:
+        so["MES_NUM"] = so[c_s_mes].map(parse_mes_to_num).astype("Int64")
+    else:
+        so["MES_NUM"] = data_ref.month if pd.notna(data_ref) else pd.NA
+
+    if c_s_ano:
+        so["ANO"] = pd.to_numeric(so[c_s_ano], errors="coerce").astype("Int64")
+    elif pd.notna(data_ref):
+        so["ANO"] = data_ref.year
+    else:
+        # Exportações mensais simplificadas podem não repetir o ano. Nesse caso,
+        # usa a competência mais recente das notas/entradas do mesmo carregamento.
+        anos_referencia = pd.concat([
+            df_citel["ANO"] if "ANO" in df_citel.columns else pd.Series(dtype=float),
+            df_ent["ANO"] if "ANO" in df_ent.columns else pd.Series(dtype=float),
+        ]).dropna()
+        ano_referencia = int(anos_referencia.max()) if not anos_referencia.empty else pd.NA
+        so["ANO"] = ano_referencia
+
+    so["DATA_DT"] = pd.to_datetime(
+        {"year": pd.to_numeric(so["ANO"], errors="coerce"),
+         "month": pd.to_numeric(so["MES_NUM"], errors="coerce"),
+         "day": 1},
+        errors="coerce",
+    )
     df_sellout = so
 
     return df_cmv, df_citel, df_ent, df_sellout
