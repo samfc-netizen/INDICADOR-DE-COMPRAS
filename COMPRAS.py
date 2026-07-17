@@ -6,8 +6,8 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-17.7 — Ano do Sellout alinhado às bases"
-FILTER_STATE_VERSION = "sellout-mensal-v2"
+APP_VERSION = "2026-07-17.8 — Invalidação completa do cache das bases"
+FILTER_STATE_VERSION = "sellout-mensal-v3"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -166,7 +166,7 @@ def most_frequent_nonempty(series: pd.Series) -> str:
 # Carregamento
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def read_report_csv(path: str, required_terms=()):
+def read_report_csv(path: str, required_terms=(), source_token=None):
     """Lê CSV exportado pelo Citel, localizando automaticamente a linha do cabeçalho."""
     encodings = ("utf-8-sig", "latin1", "cp1252")
     last_error = None
@@ -347,7 +347,7 @@ def empty_citel():
 @st.cache_data(show_spinner=False)
 def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str, cache_token=None):
     # ---------------- CADASTROS ----------------
-    cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."))
+    cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."), cache_token)
     c_cnpj = find_col(cad_forn, "C.P.F./C.N.P.J.") or find_col(cad_forn, "CPF/CNPJ")
     c_nome_f = find_col(cad_forn, "NOME DO FORNECEDOR")
     if c_cnpj is None or c_nome_f is None:
@@ -366,7 +366,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     cad_nome_valid = cad_nome_valid[cad_nome_valid["NOME_KEY"].isin(unique_name_keys)].drop_duplicates("NOME_KEY", keep="last")
     nome_to_supplier = dict(zip(cad_nome_valid["NOME_KEY"], cad_nome_valid["FORNECEDOR_CAD"]))
 
-    cad_prod = read_report_csv(cad_prod_path, ("Cód.Item", "Desc. Fornecedor", "Desc. Linha/Grupo"))
+    cad_prod = read_report_csv(cad_prod_path, ("Cód.Item", "Desc. Fornecedor", "Desc. Linha/Grupo"), cache_token)
     c_prod_cod = find_col(cad_prod, "CÓD.ITEM") or find_col(cad_prod, "COD.ITEM") or find_col(cad_prod, "CÓDIGO")
     c_prod_forn = find_col(cad_prod, "DESC. FORNECEDOR")
     c_prod_linha = find_col(cad_prod, "DESC. LINHA/GRUPO")
@@ -454,7 +454,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
             df_citel = notas
 
     # ---------------- NOTAS DE ENTRADA ANALÍTICAS ----------------
-    ent = read_report_csv(entradas_path, ("DOCUMENTO", "FORNECEDOR", "VR. CONTÁBIL"))
+    ent = read_report_csv(entradas_path, ("DOCUMENTO", "FORNECEDOR", "VR. CONTÁBIL"), cache_token)
     c_e_doc = find_col(ent, "DOCUMENTO")
     c_e_forn = find_col(ent, "FORNECEDOR")
     c_e_data = find_col(ent, "DATA")
@@ -550,7 +550,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
                 ], ignore_index=True)
 
     # ---------------- SELLOUT ----------------
-    so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"))
+    so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"), cache_token)
     c_s_cod = find_col(so, "CÓDIGO") or find_col(so, "CODIGO")
     c_s_forn = find_col(so, "FORNECEDOR")
     c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
