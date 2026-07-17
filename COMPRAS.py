@@ -1,0 +1,1241 @@
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+import re
+
+st.set_page_config(page_title="Indicador de Compras", layout="wide")
+
+GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
+CAD_FORNECEDORES_PATH = "CADASTRO DE FORNECEDORES.csv"
+CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
+SELLOUT_PATH = "sellout.csv"
+NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
+
+MESES_PT = {
+    "JANEIRO": 1, "FEVEREIRO": 2, "MARÇO": 3, "MARCO": 3, "ABRIL": 4, "MAIO": 5, "JUNHO": 6,
+    "JULHO": 7, "AGOSTO": 8, "SETEMBRO": 9, "OUTUBRO": 10, "NOVEMBRO": 11, "DEZEMBRO": 12
+}
+MESES_LABELS = ["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO","JULHO","AGOSTO","SETEMBRO","OUTUBRO","NOVEMBRO","DEZEMBRO"]
+
+
+# -----------------------------
+# Utilidades
+# -----------------------------
+def strip_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def colnorm(name: str) -> str:
+    s = str(name).strip().upper()
+    s = s.replace("\t", " ")
+    s = " ".join(s.split())
+    return s
+
+def find_col(df: pd.DataFrame, target_norm: str):
+    mapping = {colnorm(c): c for c in df.columns}
+    return mapping.get(target_norm)
+
+def to_float(series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").fillna(0.0)
+
+def to_datetime_safe(s):
+    return pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+def month_number_from_text(s):
+    s = "" if pd.isna(s) else str(s).strip().upper()
+    return MESES_PT.get(s, pd.NA)
+
+def parse_mes_to_num(x):
+    if pd.isna(x):
+        return pd.NA
+    s = str(x).strip().upper()
+
+    try:
+        n = int(float(s.replace(",", ".")))
+        if 1 <= n <= 12:
+            return n
+    except Exception:
+        pass
+
+    if s in MESES_PT:
+        return MESES_PT[s]
+
+    for nome, num in MESES_PT.items():
+        if nome in s:
+            return num
+
+    m = re.search(r"\b(\d{1,2})\b", s)
+    if m:
+        try:
+            n = int(m.group(1))
+            if 1 <= n <= 12:
+                return n
+        except Exception:
+            pass
+
+    return pd.NA
+
+def supplier_key(s: str) -> str:
+    s = "" if pd.isna(s) else str(s).strip().upper()
+    s = re.sub(r"^\s*\d+\s*-\s*", "", s)
+    s = "".join(ch if ch.isalnum() or ch.isspace() else " " for ch in s)
+    s = " ".join(s.split())
+    return s
+
+def brl(v) -> str:
+    try:
+        v = float(v)
+    except Exception:
+        v = 0.0
+    s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
+
+def pct_str(v: float) -> str:
+    try:
+        s = f"{v*100:,.2f}"
+    except Exception:
+        s = "0,00"
+    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{s}%"
+
+def style_dif(val):
+    try:
+        v = float(val)
+    except Exception:
+        v = 0.0
+    if v > 0:
+        return "color:#0a7a2f;font-weight:900;"
+    if v < 0:
+        return "color:#b00020;font-weight:900;"
+    return "color:#333;font-weight:800;"
+
+def nota_key(x) -> str:
+    if pd.isna(x):
+        return ""
+    s = str(x).strip()
+    digits = "".join(ch for ch in s if ch.isdigit())
+    return digits.lstrip("0")
+
+def find_sheet_name(excel: pd.ExcelFile, wanted: str):
+    wn = colnorm(wanted)
+    for sh in excel.sheet_names:
+        if colnorm(sh) == wn:
+            return sh
+    for sh in excel.sheet_names:
+        if wn in colnorm(sh):
+            return sh
+    return None
+
+def most_frequent_nonempty(series: pd.Series) -> str:
+    s = series.dropna().astype(str).map(lambda x: x.strip()).replace("", pd.NA).dropna()
+    if s.empty:
+        return ""
+    return str(s.value_counts().index[0])
+
+
+# -----------------------------
+# Carregamento
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def read_report_csv(path: str, required_terms=()):
+    """Lê CSV exportado pelo Citel, localizando automaticamente a linha do cabeçalho."""
+    encodings = ("utf-8-sig", "latin1", "cp1252")
+    last_error = None
+    for encoding in encodings:
+        try:
+            with open(path, "r", encoding=encoding, errors="strict") as arq:
+                linhas = arq.readlines()
+            header_idx = None
+            terms = [colnorm(x) for x in required_terms]
+            for i, linha in enumerate(linhas[:250]):
+                norm = colnorm(linha.replace(";", " "))
+                if terms and all(t in norm for t in terms):
+                    header_idx = i
+                    break
+            if header_idx is None:
+                # fallback: primeira linha com vários separadores
+                for i, linha in enumerate(linhas[:250]):
+                    if linha.count(";") >= 3:
+                        header_idx = i
+                        break
+            if header_idx is None:
+                raise ValueError("Cabeçalho tabular não localizado.")
+            return strip_cols(pd.read_csv(
+                path, sep=";", skiprows=header_idx, encoding=encoding,
+                decimal=",", thousands=".", dtype=str, engine="python"
+            ))
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f"Não foi possível ler {path}: {last_error}")
+
+
+def only_digits(value) -> str:
+    if pd.isna(value):
+        return ""
+    return re.sub(r"\D", "", str(value))
+
+
+def product_key(value) -> str:
+    """Normaliza códigos como 020004.84658 para 84658 e 84658.0 para 84658."""
+    if pd.isna(value):
+        return ""
+    s = str(value).strip()
+    if "." in s and re.fullmatch(r"\d+\.\d+", s):
+        left, right = s.split(".", 1)
+        # Código Citel composto: prefixo.Produto
+        if len(right) >= 4 and not set(right) <= {"0"}:
+            s = right
+        elif set(right) <= {"0"}:
+            s = left
+    digits = only_digits(s)
+    return digits.lstrip("0") or "0"
+
+
+def parse_number_br(series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0.0)
+    s = series.fillna("").astype(str).str.strip()
+    both = s.str.contains(",", regex=False) & s.str.contains(".", regex=False)
+    s.loc[both] = s.loc[both].str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    comma = s.str.contains(",", regex=False) & ~s.str.contains(".", regex=False)
+    s.loc[comma] = s.loc[comma].str.replace(",", ".", regex=False)
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+
+
+def canonical_supplier(name, brand="") -> str:
+    """Consolida razão social e aplica as divisões comerciais solicitadas."""
+    raw = "" if pd.isna(name) else str(name).upper().strip()
+    brand_n = "" if pd.isna(brand) else str(brand).upper().strip()
+    raw = re.sub(r"^\s*\d+\s*[-–:]\s*", "", raw)
+    raw = re.sub(r"\b(LTDA|S/?A|SA|EIRELI|ME|EPP)\b\.?", " ", raw)
+    raw = re.sub(r"[^A-Z0-9À-Ü]+", " ", raw)
+    raw = " ".join(raw.split())
+
+    if brand_n in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}:
+        return "AKZO NOBEL AUTO"
+    if brand_n in {"CORAL", "MACTRA", "HAMMERITE", "CETOL SPARLACK", "SPARLACK", "CETOL"}:
+        return "AKZO NOBEL DECOR"
+    if "SAINT" in raw and "GOBAIN" in raw:
+        if "TEK BOND" in brand_n or "TEKBOND" in brand_n:
+            return "SAINT GOBAIN TEK BOND"
+        if "NORTON" in brand_n:
+            return "SAINT GOBAIN NORTON"
+        return "SAINT GOBAIN"
+    if re.search(r"(^| )3M( |$)", raw):
+        return "3M DO BRASIL"
+    if "AKZO" in raw and "NOBEL" in raw:
+        return "AKZO NOBEL"
+    return raw
+
+
+def build_supplier_key(name, brand="") -> str:
+    return supplier_key(canonical_supplier(name, brand))
+
+
+def empty_citel():
+    return pd.DataFrame(columns=[
+        "FORNECEDOR_CITEL", "FORN_KEY", "COMPRA_VALOR", "DATA_DT", "ANO",
+        "MES_NUM", "NR_DOCUMENTO", "NOTA_KEY"
+    ])
+
+
+@st.cache_data(show_spinner=False)
+def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str):
+    # ---------------- CADASTROS ----------------
+    cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."))
+    c_cnpj = find_col(cad_forn, "C.P.F./C.N.P.J.") or find_col(cad_forn, "CPF/CNPJ")
+    c_nome_f = find_col(cad_forn, "NOME DO FORNECEDOR")
+    if c_cnpj is None or c_nome_f is None:
+        raise ValueError(f"CADASTRO DE FORNECEDORES: colunas obrigatórias ausentes. Colunas: {list(cad_forn.columns)}")
+    cad_forn["CNPJ_KEY"] = cad_forn[c_cnpj].map(only_digits)
+    cad_forn["FORNECEDOR_CAD"] = cad_forn[c_nome_f].fillna("").astype(str).str.strip()
+    cad_forn = cad_forn[cad_forn["CNPJ_KEY"] != ""].drop_duplicates("CNPJ_KEY", keep="last")
+    cnpj_to_supplier = dict(zip(cad_forn["CNPJ_KEY"], cad_forn["FORNECEDOR_CAD"]))
+
+    cad_prod = read_report_csv(cad_prod_path, ("Cód.Item", "Desc. Fornecedor", "Desc. Linha/Grupo"))
+    c_prod_cod = find_col(cad_prod, "CÓD.ITEM") or find_col(cad_prod, "COD.ITEM") or find_col(cad_prod, "CÓDIGO")
+    c_prod_forn = find_col(cad_prod, "DESC. FORNECEDOR")
+    c_prod_linha = find_col(cad_prod, "DESC. LINHA/GRUPO")
+    c_prod_marca = find_col(cad_prod, "DESC. MARCA")
+    if not all([c_prod_cod, c_prod_forn, c_prod_linha]):
+        raise ValueError(f"CADASTRO PRODUTOS GERAL: colunas obrigatórias ausentes. Colunas: {list(cad_prod.columns)}")
+    cad_prod["COD_KEY"] = cad_prod[c_prod_cod].map(product_key)
+    cad_prod["FORNECEDOR_PROD"] = cad_prod[c_prod_forn].fillna("").astype(str).str.strip()
+    cad_prod["LINHA_PROD"] = cad_prod[c_prod_linha].fillna("").astype(str).str.strip()
+    cad_prod["MARCA_PROD"] = cad_prod[c_prod_marca].fillna("").astype(str).str.strip() if c_prod_marca else ""
+    cad_prod = cad_prod[cad_prod["COD_KEY"] != ""].drop_duplicates("COD_KEY", keep="last")
+    prod_lookup = cad_prod[["COD_KEY", "FORNECEDOR_PROD", "LINHA_PROD", "MARCA_PROD"]]
+
+    # ---------------- GIRO / CMV / ESTOQUE + NOTAS CITEL ----------------
+    xls = pd.ExcelFile(giro_path)
+    giro_sheet = None
+    notas_sheet = None
+    for sh in xls.sheet_names:
+        probe = strip_cols(pd.read_excel(xls, sheet_name=sh, nrows=3))
+        norms = {colnorm(c) for c in probe.columns}
+        if {"CÓDIGO", "CMV", "VLR ESTOQUE"}.issubset(norms):
+            giro_sheet = sh
+        if "NR_CNPJ_EMITENTE" in norms:
+            notas_sheet = sh
+    if giro_sheet is None:
+        raise ValueError(f"GIRO E NOTAS: não encontrei aba com CÓDIGO, CMV e VLR ESTOQUE. Abas: {xls.sheet_names}")
+
+    giro = strip_cols(pd.read_excel(xls, sheet_name=giro_sheet))
+    c_g_cod = find_col(giro, "CÓDIGO") or find_col(giro, "CODIGO")
+    c_g_desc = find_col(giro, "DESCRIÇÃO DO ITEM") or find_col(giro, "DESCRICAO DO ITEM")
+    c_g_marca = find_col(giro, "MARCA")
+    c_g_cmv = find_col(giro, "CMV")
+    c_g_est = find_col(giro, "VLR ESTOQUE") or find_col(giro, "VLR_ESTOQUE")
+    c_g_mes = find_col(giro, "MÊS") or find_col(giro, "MES")
+    if not all([c_g_cod, c_g_cmv, c_g_est]):
+        raise ValueError(f"GIRO: colunas obrigatórias ausentes. Colunas: {list(giro.columns)}")
+    giro["COD_KEY"] = giro[c_g_cod].map(product_key)
+    giro = giro.merge(prod_lookup, on="COD_KEY", how="left")
+    giro["MARCA"] = giro[c_g_marca].fillna("").astype(str).str.strip() if c_g_marca else giro["MARCA_PROD"]
+    giro["LINHA"] = giro["LINHA_PROD"].fillna("").astype(str).str.strip()
+    giro["FORNECEDOR_CMV"] = [canonical_supplier(n, m) for n, m in zip(giro["FORNECEDOR_PROD"], giro["MARCA"])]
+    giro["FORN_KEY"] = giro["FORNECEDOR_CMV"].map(supplier_key)
+    giro["CMV_VALOR"] = parse_number_br(giro[c_g_cmv])
+    giro["ESTOQUE_VALOR"] = parse_number_br(giro[c_g_est])
+    giro["MES_NUM"] = giro[c_g_mes].map(parse_mes_to_num) if c_g_mes else pd.NA
+    df_cmv = giro
+
+    df_citel = empty_citel()
+    if notas_sheet is not None:
+        notas = strip_cols(pd.read_excel(xls, sheet_name=notas_sheet))
+        c_n_cnpj = find_col(notas, "NR_CNPJ_EMITENTE")
+        c_n_val = find_col(notas, "VL_NOTA_FISCAL") or find_col(notas, "VALOR NOTA") or find_col(notas, "VR. CONTÁBIL")
+        c_n_dt = find_col(notas, "DT_EMISSAO") or find_col(notas, "DATA")
+        c_n_doc = find_col(notas, "NR_DOCUMENTO") or find_col(notas, "DOCUMENTO") or find_col(notas, "NR NOTA FISCAL")
+        if all([c_n_cnpj, c_n_val, c_n_dt, c_n_doc]):
+            notas["CNPJ_KEY"] = notas[c_n_cnpj].map(only_digits)
+            notas["FORNECEDOR_CITEL"] = notas["CNPJ_KEY"].map(cnpj_to_supplier).fillna("CNPJ NÃO CADASTRADO")
+            notas["FORN_KEY"] = notas["FORNECEDOR_CITEL"].map(build_supplier_key)
+            notas["COMPRA_VALOR"] = parse_number_br(notas[c_n_val])
+            notas["DATA_DT"] = to_datetime_safe(notas[c_n_dt])
+            notas["ANO"] = notas["DATA_DT"].dt.year
+            notas["MES_NUM"] = notas["DATA_DT"].dt.month
+            notas["NR_DOCUMENTO"] = notas[c_n_doc]
+            notas["NOTA_KEY"] = notas["NR_DOCUMENTO"].map(nota_key)
+            df_citel = notas
+
+    # ---------------- NOTAS DE ENTRADA ANALÍTICAS ----------------
+    ent = read_report_csv(entradas_path, ("DOCUMENTO", "FORNECEDOR", "VR. CONTÁBIL"))
+    c_e_doc = find_col(ent, "DOCUMENTO")
+    c_e_forn = find_col(ent, "FORNECEDOR")
+    c_e_data = find_col(ent, "DATA")
+    c_e_cod = find_col(ent, "CÓDIGO") or find_col(ent, "CODIGO")
+    c_e_marca = find_col(ent, "MARCA")
+    c_e_val = find_col(ent, "VR. CONTÁBIL") or find_col(ent, "VR CONTABIL")
+    if not all([c_e_doc, c_e_forn, c_e_data, c_e_val]):
+        raise ValueError(f"NOTAS DE ENTRADA: colunas obrigatórias ausentes. Colunas: {list(ent.columns)}")
+    ent["COD_KEY"] = ent[c_e_cod].map(product_key) if c_e_cod else ""
+    ent = ent.merge(prod_lookup[["COD_KEY", "LINHA_PROD"]], on="COD_KEY", how="left")
+    ent["MARCA"] = ent[c_e_marca].fillna("").astype(str).str.strip() if c_e_marca else ""
+    ent["FORNECEDOR_ENT"] = [canonical_supplier(n, m) for n, m in zip(ent[c_e_forn], ent["MARCA"])]
+    ent["FORN_KEY"] = ent["FORNECEDOR_ENT"].map(supplier_key)
+    ent["VR_CONTABIL"] = parse_number_br(ent[c_e_val])
+    ent["NR_NOTA_FISCAL"] = ent[c_e_doc]
+    ent["NOTA_KEY"] = ent["NR_NOTA_FISCAL"].map(nota_key)
+    ent["LINHA"] = ent["LINHA_PROD"].fillna("").astype(str).str.strip()
+    ent["GRUPO"] = ""
+    ent["DATA_DT"] = to_datetime_safe(ent[c_e_data])
+    ent["ANO"] = ent["DATA_DT"].dt.year
+    ent["MES_NUM"] = ent["DATA_DT"].dt.month
+    df_ent = ent
+
+    # ---------------- SELLOUT ----------------
+    so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"))
+    c_s_cod = find_col(so, "CÓDIGO") or find_col(so, "CODIGO")
+    c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
+    c_s_fat = find_col(so, "FATURAMENTO")
+    c_s_qtd = find_col(so, "QTD. FATUR") or find_col(so, "QTD FATUR")
+    if not all([c_s_cod, c_s_fat]):
+        raise ValueError(f"SELLOUT: colunas obrigatórias ausentes. Colunas: {list(so.columns)}")
+    so["COD_KEY"] = so[c_s_cod].map(product_key)
+    so = so.merge(prod_lookup, on="COD_KEY", how="left")
+    so["MARCA"] = so["MARCA_PROD"].fillna("").astype(str).str.strip()
+    so["FORNECEDOR_SELLOUT"] = [canonical_supplier(n, m) for n, m in zip(so["FORNECEDOR_PROD"], so["MARCA"])]
+    so["FORN_KEY"] = so["FORNECEDOR_SELLOUT"].map(supplier_key)
+    so["LINHA"] = so["LINHA_PROD"].fillna("").astype(str).str.strip()
+    so["FATURAMENTO"] = parse_number_br(so[c_s_fat])
+    so["QTD_FATUR"] = parse_number_br(so[c_s_qtd]) if c_s_qtd else 0.0
+    so["CODIGO"] = so["COD_KEY"]
+    so["DESCRICAO_PRODUTO"] = so[c_s_desc].fillna("").astype(str).str.strip() if c_s_desc else ""
+
+    # Período do relatório de sellout, extraído do cabeçalho do arquivo.
+    text = open(sellout_path, "r", encoding="latin1", errors="ignore").read()[:8000]
+    mi = re.search(r"Data Inicial \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    mf = re.search(r"Data Final \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
+    data_ref = pd.to_datetime(mf.group(1), dayfirst=True) if mf else (pd.to_datetime(mi.group(1), dayfirst=True) if mi else pd.NaT)
+    so["DATA_DT"] = data_ref
+    so["ANO"] = data_ref.year if pd.notna(data_ref) else pd.NA
+    so["MES_NUM"] = data_ref.month if pd.notna(data_ref) else pd.NA
+    df_sellout = so
+
+    return df_cmv, df_citel, df_ent, df_sellout
+
+
+try:
+    df_cmv, df_citel, df_ent, df_sellout = load_data(
+        GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
+        SELLOUT_PATH, NOTAS_ENTRADA_PATH
+    )
+except Exception as e:
+    st.error(f"Erro ao carregar as bases: {e}")
+    st.stop()
+
+
+# -----------------------------
+# Sidebar: Página + filtros
+# -----------------------------
+st.sidebar.title("Navegação")
+page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR"])
+
+st.sidebar.divider()
+st.sidebar.subheader("Filtros")
+
+anos_citel = sorted(df_citel["ANO"].dropna().astype(int).unique().tolist())
+anos_ent = sorted(df_ent["ANO"].dropna().astype(int).unique().tolist())
+anos_sellout = []
+if df_sellout is not None and "ANO" in df_sellout.columns and df_sellout["ANO"].notna().any():
+    anos_sellout = sorted(df_sellout["ANO"].dropna().astype(int).unique().tolist())
+
+anos = sorted(set(anos_citel + anos_ent + anos_sellout))
+# Os filtros globais ficam dentro de um formulário para evitar que cada clique
+# provoque a reconstrução completa de todas as tabelas e gráficos.
+with st.sidebar.form("form_filtros_globais", clear_on_submit=False):
+    sel_anos_input = st.multiselect(
+        "Ano",
+        options=anos,
+        default=st.session_state.get("filtro_anos_aplicado", anos),
+        key="filtro_anos_input",
+    )
+    sel_meses_input = st.multiselect(
+        "Mês",
+        options=MESES_LABELS,
+        default=st.session_state.get("filtro_meses_aplicado", MESES_LABELS),
+        key="filtro_meses_input",
+    )
+    aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
+
+if aplicar_filtros or "filtro_anos_aplicado" not in st.session_state:
+    st.session_state["filtro_anos_aplicado"] = sel_anos_input
+    st.session_state["filtro_meses_aplicado"] = sel_meses_input
+
+sel_anos = st.session_state.get("filtro_anos_aplicado", anos)
+sel_meses = st.session_state.get("filtro_meses_aplicado", MESES_LABELS)
+sel_meses_num = [MESES_PT[m] for m in sel_meses if m in MESES_PT]
+
+def apply_month_year_filter(df, apply_year=True, apply_month=True):
+    if df is None:
+        return None
+    out = df
+    if apply_year and sel_anos and "ANO" in out.columns and out["ANO"].notna().any():
+        out = out[out["ANO"].isin(sel_anos)]
+    if apply_month and sel_meses_num and "MES_NUM" in out.columns:
+        out = out[out["MES_NUM"].isin(sel_meses_num)]
+    return out
+
+df_citel_f = apply_month_year_filter(df_citel, apply_year=True, apply_month=True)
+df_ent_f = apply_month_year_filter(df_ent, apply_year=True, apply_month=True)
+df_cmv_f = apply_month_year_filter(df_cmv, apply_year=False, apply_month=True)
+df_sellout_f = apply_month_year_filter(df_sellout, apply_year=True, apply_month=True) if df_sellout is not None else None
+
+
+# -----------------------------
+# PAGE: COMPRAS
+# -----------------------------
+def render_compras_page():
+    st.title("INDICADORES DE COMPRAS")
+
+    if df_citel.empty:
+        st.warning("A planilha GIRO E NOTAS atual não possui uma aba com NR_CNPJ_EMITENTE. Os indicadores de Compras CITEL ficarão zerados até essa aba ser incluída; CMV, estoque, entradas e sellout continuam disponíveis.")
+
+    # Resumo geral do período selecionado
+    total_compras_citel = float(df_citel_f["COMPRA_VALOR"].sum())
+    total_vendas_cmv = float(df_cmv_f["CMV_VALOR"].sum())
+    dif_topo = total_vendas_cmv - total_compras_citel
+
+    if total_compras_citel != 0:
+        dif_pct = dif_topo / total_compras_citel
+    elif total_vendas_cmv != 0:
+        dif_pct = dif_topo / total_vendas_cmv
+    else:
+        dif_pct = 0.0
+
+    # Quantidade real de competências selecionadas (ano x mês), usada nas médias.
+    periodos_selecionados = max(len(sel_anos) * len(sel_meses_num), 1)
+    media_compras = total_compras_citel / periodos_selecionados
+    media_cmv = total_vendas_cmv / periodos_selecionados
+    media_diferenca = dif_topo / periodos_selecionados
+
+    st.subheader("Resumo do Período Selecionado")
+
+    resumo_periodo = pd.DataFrame({
+        "INDICADOR": ["Total Compras", "Total CMV", "Diferença (CMV - Compras)"],
+        "VALOR": [total_compras_citel, total_vendas_cmv, dif_topo],
+        "% SOBRE COMPRAS": [1.0 if total_compras_citel else 0.0,
+                              (total_vendas_cmv / total_compras_citel) if total_compras_citel else 0.0,
+                              dif_pct],
+    })
+
+    st.dataframe(
+        resumo_periodo.style
+        .format({
+            "VALOR": brl,
+            "% SOBRE COMPRAS": lambda x: pct_str(float(x)),
+        })
+        .map(style_dif, subset=["VALOR"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("Média de Compras por Período", brl(media_compras))
+    with m2:
+        st.metric("Média de CMV por Período", brl(media_cmv))
+    with m3:
+        st.metric("Média da Diferença", brl(media_diferenca))
+    with m4:
+        st.metric("Períodos Considerados", periodos_selecionados)
+
+    st.caption("A média considera cada combinação de ano e mês selecionada nos filtros.")
+
+    st.divider()
+
+    # Tabela por fornecedor (CITEL x CMV)
+    st.subheader("Tabela por Fornecedor — Compras (CITEL) x CMV (Autcom)")
+
+    nome_canon = (
+        df_cmv_f.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_CMV"]]
+        .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+    )
+
+    vendas = df_cmv_f.groupby("FORN_KEY", as_index=False).agg(**{"VENDAS CMV": ("CMV_VALOR", "sum")})
+    compras = df_citel_f.groupby("FORN_KEY", as_index=False).agg(**{"COMPRAS FORNECEDOR": ("COMPRA_VALOR", "sum")})
+
+    tab = nome_canon.merge(vendas, on="FORN_KEY", how="left").merge(compras, on="FORN_KEY", how="left")
+    tab["VENDAS CMV"] = tab["VENDAS CMV"].fillna(0.0)
+    tab["COMPRAS FORNECEDOR"] = tab["COMPRAS FORNECEDOR"].fillna(0.0)
+    tab["DIF (CMV - COMPRAS)"] = tab["VENDAS CMV"] - tab["COMPRAS FORNECEDOR"]
+    tab = tab[~((tab["VENDAS CMV"] == 0) & (tab["COMPRAS FORNECEDOR"] == 0))].copy()
+    tab = tab[["FORNECEDOR", "COMPRAS FORNECEDOR", "VENDAS CMV", "DIF (CMV - COMPRAS)"]].sort_values("COMPRAS FORNECEDOR", ascending=False)
+
+    st.dataframe(
+    tab.style
+      .format({"COMPRAS FORNECEDOR": brl, "VENDAS CMV": brl, "DIF (CMV - COMPRAS)": brl})
+      .map(style_dif, subset=["DIF (CMV - COMPRAS)"]),
+    use_container_width=True,
+    hide_index=True
+    )
+
+    st.divider()
+
+    # Conciliação CITEL x ENTRADAS
+    st.subheader("Conciliação de Compras: CITEL x ENTRADAS")
+
+    total_compras_entradas = float(df_ent_f["VR_CONTABIL"].sum())
+    dif_citel_vs_ent = total_compras_citel - total_compras_entradas
+    color2 = "#0a7a2f" if dif_citel_vs_ent >= 0 else "#b00020"
+
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.markdown("### TOTAL COMPRAS (CITEL)")
+        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_compras_citel)}</div>", unsafe_allow_html=True)
+    with d2:
+        st.markdown("### TOTAL COMPRAS (ENTRADAS)")
+        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_compras_entradas)}</div>", unsafe_allow_html=True)
+    with d3:
+        st.markdown("### DIFERENÇA (CITEL - ENTRADAS)")
+        st.markdown(f"<div style='font-size:26px;font-weight:1000;color:{color2}'>{brl(dif_citel_vs_ent)}</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # Nuvem de notas (CITEL NR_DOCUMENTO vs ENTRADAS NR NOTA FISCAL)
+    st.subheader("Notas no CITEL que não constam em ENTRADAS (por Número da Nota)")
+
+    set_citel = set(df_citel_f["NOTA_KEY"].dropna().astype(str).tolist())
+    set_ent = set(df_ent_f["NOTA_KEY"].dropna().astype(str).tolist())
+    missing = sorted([k for k in set_citel if k and (k not in set_ent)])
+
+    st.caption(
+        f"Comparação direta: CITEL (NR_DOCUMENTO) vs ENTRADAS (NR NOTA FISCAL), normalizados (só dígitos, sem zeros). "
+        f"Encontradas **{len(missing)}** notas no CITEL que não aparecem em ENTRADAS no recorte selecionado."
+    )
+
+    if len(missing) == 0:
+        st.success("Nenhuma nota pendente: todas as notas do CITEL aparecem em ENTRADAS (no recorte selecionado).")
+    else:
+        max_show = 250
+        show = missing[:max_show]
+        extra = len(missing) - len(show)
+
+        tags_html = """
+        <style>
+          .tagwrap { line-height: 2.2; }
+          .tag {
+            display:inline-block;
+            padding: 4px 10px;
+            margin: 4px 6px 0 0;
+            border-radius: 16px;
+            background: #f2f2f2;
+            font-size: 13px;
+            font-weight: 800;
+          }
+        </style>
+        <div class="tagwrap">
+        """
+        for d in show:
+            tags_html += f"<span class='tag'>{d}</span>"
+        tags_html += "</div>"
+        if extra > 0:
+            tags_html += f"<div style='margin-top:10px;font-weight:800'>+{extra} notas (não exibidas)</div>"
+
+        st.markdown(tags_html, unsafe_allow_html=True)
+
+        with st.expander("Ver lista completa (tabela)"):
+            det = df_citel_f[df_citel_f["NOTA_KEY"].isin(missing)].copy()
+            det["DATA_EMISSAO"] = det["DATA_DT"].dt.strftime("%d/%m/%Y")
+            det_view = det[["NOTA_KEY", "NR_DOCUMENTO", "FORNECEDOR_CITEL", "DATA_EMISSAO", "COMPRA_VALOR"]].rename(
+                columns={
+                    "NOTA_KEY": "CHAVE_NOTA",
+                    "NR_DOCUMENTO": "NR_DOCUMENTO (CITEL)",
+                    "FORNECEDOR_CITEL": "FORNECEDOR",
+                    "COMPRA_VALOR": "VALOR (VL_NOTA_FISCAL)"
+                }
+            )
+            det_view = det_view.sort_values(["FORNECEDOR", "DATA_EMISSAO", "NR_DOCUMENTO (CITEL)"])
+            st.dataframe(
+                det_view.style.format({"VALOR (VL_NOTA_FISCAL)": brl}),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    st.divider()
+
+    # ==========================================================
+    # ✅ DRILL — Fornecedor → Marca → Linha → Grupo | ENTRADAS x CMV/Estoque
+    # + Treemap + Totais do recorte
+    # ==========================================================
+    st.subheader("Drill — Fornecedor → Marca → Linha → Grupo | Compras (ENTRADAS) x CMV/Estoque (CMV E ESTOQUE)")
+
+    if df_ent_f.empty:
+        st.info("Sem dados em NOTAS ENTRADAS no recorte selecionado.")
+        return
+
+    # Lista de fornecedores (ENTRADAS)
+    forn_list = (
+        df_ent_f.groupby(["FORN_KEY", "FORNECEDOR_ENT"], as_index=False)
+        .agg(TOTAL=("VR_CONTABIL", "sum"))
+        .sort_values("TOTAL", ascending=False)
+    )
+
+    options_forn = ["(Todos)"] + forn_list["FORNECEDOR_ENT"].tolist()
+    sel_forn = st.selectbox(
+        "Selecione o Fornecedor (ENTRADAS → DESCRIÇÃO) ou (Todos)",
+        options=options_forn,
+        index=0,
+        key="drill_forn_select"
+    )
+
+    if sel_forn == "(Todos)":
+        ent_base = df_ent_f.copy()
+        cmv_base = df_cmv_f.copy()
+        sel_forn_key = None
+    else:
+        sel_forn_key = forn_list.loc[forn_list["FORNECEDOR_ENT"] == sel_forn, "FORN_KEY"].iloc[0]
+        ent_base = df_ent_f[df_ent_f["FORN_KEY"] == sel_forn_key].copy()
+        cmv_base = df_cmv_f[df_cmv_f["FORN_KEY"] == sel_forn_key].copy()
+
+    # Filtro de marcas (somente ENTRADAS)
+    marcas = sorted([m for m in ent_base["MARCA"].dropna().astype(str).unique().tolist() if m.strip() != ""])
+    # Aplicação explícita evita um rerun pesado a cada marca marcada/desmarcada.
+    marcas_state_key = f"drill_marcas_aplicadas::{sel_forn_key or 'TODOS'}"
+    marcas_default = st.session_state.get(marcas_state_key, marcas)
+    marcas_default = [m for m in marcas_default if m in marcas]
+
+    with st.form("form_filtro_marcas", clear_on_submit=False):
+        sel_marcas_input = st.multiselect(
+            "Filtrar Marcas (ENTRADAS)",
+            options=marcas,
+            default=marcas_default,
+            key=f"drill_marcas_input::{sel_forn_key or 'TODOS'}",
+        )
+        aplicar_marcas = st.form_submit_button("Aplicar marcas")
+
+    if aplicar_marcas or marcas_state_key not in st.session_state:
+        st.session_state[marcas_state_key] = sel_marcas_input
+
+    sel_marcas = st.session_state.get(marcas_state_key, marcas)
+    if sel_marcas:
+        ent_base = ent_base[ent_base["MARCA"].isin(sel_marcas)]
+
+    if ent_base.empty:
+        st.warning("Esse recorte ficou sem dados em ENTRADAS (verifique o fornecedor/marcas).")
+        return
+
+    has_grupo = ent_base["GRUPO"].astype(str).str.strip().ne("").any()
+    group_cols = ["MARCA", "LINHA"] + (["GRUPO"] if has_grupo else [])
+
+    # Compras por bloco (MARCA/LINHA/GRUPO)
+    ent_agg = ent_base.groupby(group_cols, as_index=False).agg(COMPRAS=("VR_CONTABIL", "sum"))
+
+    # Compras totais por LINHA (para rateio)
+    comp_por_linha = ent_agg.groupby("LINHA", as_index=False).agg(COMPRAS_LINHA=("COMPRAS", "sum"))
+
+    # CMV/Estoque por LINHA
+    cmv_agg_linha = (
+        cmv_base.groupby("LINHA", as_index=False)
+        .agg(
+            VENDAS_CMV_LINHA=("CMV_VALOR", "sum"),
+            ESTOQUE_LINHA=("ESTOQUE_VALOR", "sum"),
+        )
+    )
+
+    dr = ent_agg.merge(comp_por_linha, on="LINHA", how="left").merge(cmv_agg_linha, on="LINHA", how="left")
+    dr["VENDAS_CMV_LINHA"] = dr["VENDAS_CMV_LINHA"].fillna(0.0)
+    dr["ESTOQUE_LINHA"] = dr["ESTOQUE_LINHA"].fillna(0.0)
+    dr["COMPRAS_LINHA"] = dr["COMPRAS_LINHA"].fillna(0.0)
+
+    # Rateio de CMV/Estoque para MARCA/GRUPO dentro da LINHA proporcional às compras
+    dr["VENDAS_CMV"] = 0.0
+    dr["VLR_ESTOQUE"] = 0.0
+    mask = dr["COMPRAS_LINHA"] > 0
+    dr.loc[mask, "VENDAS_CMV"] = dr.loc[mask, "VENDAS_CMV_LINHA"] * (dr.loc[mask, "COMPRAS"] / dr.loc[mask, "COMPRAS_LINHA"])
+    dr.loc[mask, "VLR_ESTOQUE"] = dr.loc[mask, "ESTOQUE_LINHA"] * (dr.loc[mask, "COMPRAS"] / dr.loc[mask, "COMPRAS_LINHA"])
+
+    dr["DIF (CMV - COMPRAS)"] = dr["VENDAS_CMV"] - dr["COMPRAS"]
+
+    total_comp = float(dr["COMPRAS"].sum())
+    total_vend = float(dr["VENDAS_CMV"].sum())
+    total_est = float(dr["VLR_ESTOQUE"].sum())
+
+    dr["PART_COMPRA_%"] = (dr["COMPRAS"] / total_comp) if total_comp != 0 else 0.0
+    dr["PART_VENDA_%"] = (dr["VENDAS_CMV"] / total_vend) if total_vend != 0 else 0.0
+    dr["PART_ESTOQUE_%"] = (dr["VLR_ESTOQUE"] / total_est) if total_est != 0 else 0.0
+
+    cols_show = group_cols + ["COMPRAS", "VENDAS_CMV", "VLR_ESTOQUE", "DIF (CMV - COMPRAS)", "PART_COMPRA_%", "PART_VENDA_%", "PART_ESTOQUE_%"]
+    dr_show = dr[cols_show].sort_values("COMPRAS", ascending=False)
+
+    st.dataframe(
+        dr_show.style
+          .format({
+              "COMPRAS": brl,
+              "VENDAS_CMV": brl,
+              "VLR_ESTOQUE": brl,
+              "DIF (CMV - COMPRAS)": brl,
+              "PART_COMPRA_%": lambda x: pct_str(float(x)),
+              "PART_VENDA_%": lambda x: pct_str(float(x)),
+              "PART_ESTOQUE_%": lambda x: pct_str(float(x)),
+          })
+          .map(style_dif, subset=["DIF (CMV - COMPRAS)"]),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.markdown("##### Participação por Linha (Mapa / Treemap)")
+    exibir_mapas = st.toggle(
+        "Exibir mapas detalhados",
+        value=False,
+        help="Os três mapas são pesados. Ative somente quando precisar analisá-los.",
+        key="exibir_treemaps_compras",
+    )
+
+    if exibir_mapas:
+        path_cols = ["MARCA"]
+        if has_grupo:
+            path_cols.append("GRUPO")
+        path_cols.append("LINHA")
+
+        # Remove linhas sem valor antes de montar os gráficos, reduzindo memória e JSON.
+        dr_plot = dr.loc[(dr["COMPRAS"] != 0) | (dr["VENDAS_CMV"] != 0) | (dr["VLR_ESTOQUE"] != 0)].copy()
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            fig_comp = px.treemap(dr_plot, path=path_cols, values="COMPRAS", title="Compras (ENTRADAS)")
+            fig_comp.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_comp, use_container_width=True, key="treemap_compras")
+        with g2:
+            fig_vend = px.treemap(dr_plot, path=path_cols, values="VENDAS_CMV", title="Vendas (CMV)")
+            fig_vend.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_vend, use_container_width=True, key="treemap_vendas")
+        with g3:
+            fig_est = px.treemap(dr_plot, path=path_cols, values="VLR_ESTOQUE", title="Valor de Estoque (CMV E ESTOQUE)")
+            fig_est.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+            st.plotly_chart(fig_est, use_container_width=True, key="treemap_estoque")
+    else:
+        st.caption("Mapas desativados para manter os filtros leves e estáveis.")
+
+    # Totais do recorte do Drill
+    t1, t2, t3 = st.columns(3)
+    with t1:
+        st.markdown("#### TOTAL COMPRAS (recorte Drill)")
+        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_comp)}</div>", unsafe_allow_html=True)
+    with t2:
+        st.markdown("#### TOTAL VENDAS CMV (recorte Drill)")
+        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_vend)}</div>", unsafe_allow_html=True)
+    with t3:
+        st.markdown("#### TOTAL VALOR ESTOQUE (recorte Drill)")
+        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_est)}</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ==========================================================
+    # ✅ NOVO: Estoque por Fornecedor (CMV E ESTOQUE) + Drill por LINHA
+    # (SEM alterar funcionalidades existentes)
+    # ==========================================================
+    st.subheader("VALOR DE ESTOQUE")
+
+    # Nome canônico do fornecedor (CMV)
+    nome_canon_cmv = (
+        df_cmv_f.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_CMV"]]
+        .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+    )
+
+    est_forn = df_cmv_f.groupby("FORN_KEY", as_index=False).agg(VLR_ESTOQUE=("ESTOQUE_VALOR", "sum"))
+    est_forn = nome_canon_cmv.merge(est_forn, on="FORN_KEY", how="left")
+    est_forn["VLR_ESTOQUE"] = est_forn["VLR_ESTOQUE"].fillna(0.0)
+
+    total_est_geral = float(est_forn["VLR_ESTOQUE"].sum())
+    est_forn["PART_ESTOQUE_%"] = (est_forn["VLR_ESTOQUE"] / total_est_geral) if total_est_geral != 0 else 0.0
+    est_forn = est_forn.sort_values("VLR_ESTOQUE", ascending=False)
+
+    st.dataframe(
+        est_forn[["FORNECEDOR", "VLR_ESTOQUE", "PART_ESTOQUE_%"]]
+        .style.format({
+            "VLR_ESTOQUE": brl,
+            "PART_ESTOQUE_%": lambda x: pct_str(float(x)),
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # Drill: selecionar fornecedor e mostrar linhas e participação dentro do fornecedor
+    options_est = ["(Selecione)"] + est_forn["FORNECEDOR"].astype(str).tolist()
+    sel_est_forn = st.selectbox("Selecionar Fornecedor (para detalhar Linhas)", options=options_est, index=0, key="estoque_forn_select")
+
+    if sel_est_forn != "(Selecione)":
+        sel_key = est_forn.loc[est_forn["FORNECEDOR"] == sel_est_forn, "FORN_KEY"].iloc[0]
+        base = df_cmv_f[df_cmv_f["FORN_KEY"] == sel_key].copy()
+
+        est_total_f = float(base["ESTOQUE_VALOR"].sum())
+        by_linha = (
+            base.groupby("LINHA", as_index=False)
+            .agg(VLR_ESTOQUE=("ESTOQUE_VALOR", "sum"))
+            .sort_values("VLR_ESTOQUE", ascending=False)
+        )
+        by_linha["PART_NO_FORNECEDOR_%"] = (by_linha["VLR_ESTOQUE"] / est_total_f) if est_total_f != 0 else 0.0
+
+        st.markdown("#### Linhas do Fornecedor — Valor de Estoque + Participação no Fornecedor (%)")
+        st.dataframe(
+            by_linha.style.format({
+                "VLR_ESTOQUE": brl,
+                "PART_NO_FORNECEDOR_%": lambda x: pct_str(float(x)),
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# -----------------------------
+# PAGE: SELLOUT
+# -----------------------------
+def render_sellout_page():
+    st.title("Indicadores de Sellout ")
+
+    if df_sellout_f is None:
+        st.warning("Aba **SELLOUT** não encontrada neste Excel.")
+        return
+
+    if df_sellout_f.empty:
+        st.info("Sem dados em SELLOUT no recorte selecionado.")
+        return
+
+    # Resumo: Sellout x CMV por fornecedor
+    so_forn = df_sellout_f.groupby("FORN_KEY", as_index=False).agg(FATURAMENTO_SELLOUT=("FATURAMENTO", "sum"))
+    cmv_forn_sum = df_cmv_f.groupby("FORN_KEY", as_index=False).agg(CMV=("CMV_VALOR", "sum"))
+
+    nome_cmv = (
+        df_cmv_f.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_CMV"]]
+        .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+    )
+    nome_so = (
+        df_sellout_f.groupby(["FORN_KEY", "FORNECEDOR_SELLOUT"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_SELLOUT"]]
+        .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+    )
+
+    sell_tab = so_forn.merge(cmv_forn_sum, on="FORN_KEY", how="left")
+    sell_tab["CMV"] = sell_tab["CMV"].fillna(0.0)
+    sell_tab = sell_tab.merge(nome_cmv, on="FORN_KEY", how="left")
+    sell_tab = sell_tab.merge(nome_so, on="FORN_KEY", how="left", suffixes=("", "_SO"))
+    sell_tab["FORNECEDOR"] = sell_tab["FORNECEDOR"].fillna(sell_tab["FORNECEDOR_SO"]).fillna("")
+
+    sell_tab["MARKUP"] = sell_tab.apply(lambda r: (r["FATURAMENTO_SELLOUT"] / r["CMV"]) if r["CMV"] != 0 else 0.0, axis=1)
+    total_sellout = float(sell_tab["FATURAMENTO_SELLOUT"].sum())
+    sell_tab["PART_FORNECEDOR_%"] = (sell_tab["FATURAMENTO_SELLOUT"] / total_sellout) if total_sellout != 0 else 0.0
+
+    sell_tab = sell_tab[["FORNECEDOR", "FATURAMENTO_SELLOUT", "CMV", "MARKUP", "PART_FORNECEDOR_%"]].sort_values("FATURAMENTO_SELLOUT", ascending=False)
+
+    st.subheader("Resumo — Fornecedor | Faturamento | CMV | Markup | Participação")
+    st.dataframe(
+        sell_tab.style.format({
+            "FATURAMENTO_SELLOUT": brl,
+            "CMV": brl,
+            "MARKUP": lambda x: f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+            "PART_FORNECEDOR_%": lambda x: pct_str(float(x)),
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.divider()
+
+    # Novo KPI: Fornecedor -> Linhas -> Produtos
+    st.subheader("Drill por Fornecedor — Linhas e Produtos")
+
+    nome_so_drill = (
+        df_sellout_f.groupby(["FORN_KEY", "FORNECEDOR_SELLOUT"], as_index=False)
+        .size()
+        .sort_values(["FORN_KEY", "size"], ascending=[True, False])
+        .drop_duplicates("FORN_KEY")[["FORN_KEY", "FORNECEDOR_SELLOUT"]]
+        .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+    )
+
+    forn_drill_tab = (
+        df_sellout_f.groupby("FORN_KEY", as_index=False)
+        .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+        .merge(nome_so_drill, on="FORN_KEY", how="left")
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+
+    if forn_drill_tab.empty:
+        st.info("Sem fornecedores no SELLOUT para o recorte selecionado.")
+    else:
+        forn_options = forn_drill_tab["FORNECEDOR"].fillna("").astype(str).tolist()
+        sel_forn_drill = st.selectbox(
+            "Selecione o Fornecedor (SELLOUT)",
+            options=forn_options,
+            index=0,
+            key="sellout_fornecedor_drill_select"
+        )
+
+        sel_forn_key = forn_drill_tab.loc[forn_drill_tab["FORNECEDOR"] == sel_forn_drill, "FORN_KEY"].iloc[0]
+        so_forn_base = df_sellout_f[df_sellout_f["FORN_KEY"] == sel_forn_key].copy()
+
+        linhas_forn = (
+            so_forn_base[so_forn_base["LINHA"].astype(str).str.strip() != ""]
+            .groupby("LINHA", as_index=False)
+            .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+            .sort_values("FATURAMENTO", ascending=False)
+        )
+
+        total_forn = float(linhas_forn["FATURAMENTO"].sum())
+        linhas_forn["% LINHA / FORNECEDOR"] = (linhas_forn["FATURAMENTO"] / total_forn) if total_forn != 0 else 0.0
+
+        st.markdown("#### Linhas do Fornecedor")
+        st.dataframe(
+            linhas_forn.style.format({
+                "FATURAMENTO": brl,
+                "% LINHA / FORNECEDOR": lambda x: pct_str(float(x)),
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        if linhas_forn.empty:
+            st.info("Esse fornecedor não possui linha preenchida no recorte selecionado.")
+        else:
+            linha_options = linhas_forn["LINHA"].astype(str).tolist()
+            sel_linha_forn = st.selectbox(
+                "Selecione a Linha do Fornecedor",
+                options=linha_options,
+                index=0,
+                key="sellout_linha_fornecedor_select"
+            )
+
+            so_line_forn = so_forn_base[so_forn_base["LINHA"].astype(str) == str(sel_linha_forn)].copy()
+            total_line_forn = float(so_line_forn["FATURAMENTO"].sum())
+
+            desc_canon_forn = (
+                so_line_forn.groupby("CODIGO", as_index=False)["DESCRICAO_PRODUTO"]
+                .apply(most_frequent_nonempty)
+                .rename(columns={"DESCRICAO_PRODUTO": "DESCRIÇÃO DO PRODUTO"})
+            )
+
+            prod_line_forn = (
+                so_line_forn.groupby("CODIGO", as_index=False)
+                .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+                .sort_values("FATURAMENTO", ascending=False)
+            )
+            prod_line_forn = prod_line_forn.merge(desc_canon_forn, on="CODIGO", how="left")
+            prod_line_forn["DESCRIÇÃO DO PRODUTO"] = prod_line_forn["DESCRIÇÃO DO PRODUTO"].fillna("")
+            prod_line_forn["% PRODUTO / LINHA"] = (prod_line_forn["FATURAMENTO"] / total_line_forn) if total_line_forn != 0 else 0.0
+
+            st.markdown("#### Produtos da Linha Selecionada")
+            st.dataframe(
+                prod_line_forn[["CODIGO", "DESCRIÇÃO DO PRODUTO", "FATURAMENTO", "% PRODUTO / LINHA"]]
+                .style.format({
+                    "FATURAMENTO": brl,
+                    "% PRODUTO / LINHA": lambda x: pct_str(float(x)),
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    st.divider()
+
+    # Drill por LINHA (fornecedores + produtos)
+    st.subheader("Drill por LINHA — Fornecedores e Produtos (participações %)")
+
+    linhas_all = sorted([x for x in df_sellout_f["LINHA"].dropna().astype(str).unique().tolist() if x.strip() != ""])
+    if not linhas_all:
+        st.info("Sem LINHA preenchida no SELLOUT para o recorte selecionado.")
+        return
+
+    sel_line_global = st.selectbox("Selecione a LINHA (SELLOUT)", options=linhas_all, index=0, key="sellout_line_global_select")
+
+    so_line_all = df_sellout_f[df_sellout_f["LINHA"].astype(str) == str(sel_line_global)].copy()
+    total_line = float(so_line_all["FATURAMENTO"].sum())
+
+    by_forn = (
+        so_line_all.groupby(["FORN_KEY", "FORNECEDOR_SELLOUT"], as_index=False)
+        .agg(FATURAMENTO=("FATURAMENTO", "sum"))
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+    by_forn["% FORNECEDOR / LINHA"] = (by_forn["FATURAMENTO"] / total_line) if total_line != 0 else 0.0
+
+    st.markdown("#### Fornecedores da Linha")
+    st.dataframe(
+        by_forn[["FORNECEDOR_SELLOUT", "FATURAMENTO", "% FORNECEDOR / LINHA"]]
+            .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+            .style.format({
+                "FATURAMENTO": brl,
+                "% FORNECEDOR / LINHA": lambda x: pct_str(float(x)),
+            }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    desc_canon_all = (
+        so_line_all.groupby("CODIGO", as_index=False)["DESCRICAO_PRODUTO"]
+        .apply(most_frequent_nonempty)
+        .rename(columns={"DESCRICAO_PRODUTO": "DESCRIÇÃO DO PRODUTO"})
+    )
+
+    prod_all = (
+        so_line_all.groupby("CODIGO", as_index=False)
+        .agg(FATURAMENTO=("FATURAMENTO", "sum"), QTD_FATUR=("QTD_FATUR", "sum"))
+        .sort_values("FATURAMENTO", ascending=False)
+    )
+    prod_all = prod_all.merge(desc_canon_all, on="CODIGO", how="left")
+    prod_all["DESCRIÇÃO DO PRODUTO"] = prod_all["DESCRIÇÃO DO PRODUTO"].fillna("")
+    prod_all["% PRODUTO / LINHA"] = (prod_all["FATURAMENTO"] / total_line) if total_line != 0 else 0.0
+
+    st.markdown("#### Produtos da Linha (participação %)")
+    st.dataframe(
+        prod_all[["CODIGO", "DESCRIÇÃO DO PRODUTO", "FATURAMENTO", "QTD_FATUR", "% PRODUTO / LINHA"]]
+            .style.format({
+                "FATURAMENTO": brl,
+                "QTD_FATUR": lambda x: f"{float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", "."),
+                "% PRODUTO / LINHA": lambda x: pct_str(float(x)),
+            }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# -----------------------------
+# PAGE: HISTÓRICO POR FORNECEDOR
+# -----------------------------
+def render_historico_fornecedor_page():
+    st.title("HISTÓRICO MENSAL POR FORNECEDOR")
+    st.caption("Acompanhe, mês a mês, as Compras, o CMV e o Sellout do fornecedor selecionado.")
+
+    # Cadastro canônico de fornecedores reunindo todas as fontes disponíveis.
+    cadastros = []
+    if not df_citel.empty:
+        cadastros.append(
+            df_citel[["FORN_KEY", "FORNECEDOR_CITEL"]]
+            .rename(columns={"FORNECEDOR_CITEL": "FORNECEDOR"})
+        )
+    if not df_cmv.empty:
+        cadastros.append(
+            df_cmv[["FORN_KEY", "FORNECEDOR_CMV"]]
+            .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+        )
+    if df_sellout is not None and not df_sellout.empty:
+        cadastros.append(
+            df_sellout[["FORN_KEY", "FORNECEDOR_SELLOUT"]]
+            .rename(columns={"FORNECEDOR_SELLOUT": "FORNECEDOR"})
+        )
+
+    if not cadastros:
+        st.info("Não há fornecedores disponíveis nas bases carregadas.")
+        return
+
+    fornecedores_base = pd.concat(cadastros, ignore_index=True)
+    fornecedores_base["FORNECEDOR"] = fornecedores_base["FORNECEDOR"].fillna("").astype(str).str.strip()
+    fornecedores_base = fornecedores_base[
+        (fornecedores_base["FORN_KEY"].astype(str).str.strip() != "")
+        & (fornecedores_base["FORNECEDOR"] != "")
+    ]
+
+    fornecedores = (
+        fornecedores_base.groupby("FORN_KEY", as_index=False)
+        .agg(FORNECEDOR=("FORNECEDOR", most_frequent_nonempty))
+        .sort_values("FORNECEDOR")
+    )
+
+    if fornecedores.empty:
+        st.info("Não foi possível identificar fornecedores válidos nas bases.")
+        return
+
+    anos_hist = sorted(set(anos_citel + anos_sellout))
+    if not anos_hist:
+        anos_hist = anos if anos else []
+
+    f1, f2 = st.columns([2, 1])
+    with f1:
+        fornecedor_nome = st.selectbox(
+            "Fornecedor",
+            options=fornecedores["FORNECEDOR"].tolist(),
+            key="historico_fornecedor_select",
+        )
+    with f2:
+        ano_padrao = anos_hist[-1] if anos_hist else None
+        ano_hist = st.selectbox(
+            "Ano",
+            options=anos_hist,
+            index=(len(anos_hist) - 1) if anos_hist else 0,
+            key="historico_fornecedor_ano",
+        ) if anos_hist else None
+
+    fornecedor_key = fornecedores.loc[
+        fornecedores["FORNECEDOR"] == fornecedor_nome, "FORN_KEY"
+    ].iloc[0]
+
+    # Compras: fonte CITEL, com ano e mês da data de emissão.
+    compras_base = df_citel[df_citel["FORN_KEY"] == fornecedor_key].copy()
+    if ano_hist is not None and "ANO" in compras_base.columns:
+        compras_base = compras_base[compras_base["ANO"] == ano_hist]
+    compras_mes = compras_base.groupby("MES_NUM")["COMPRA_VALOR"].sum()
+
+    # CMV: a planilha CMV E ESTOQUE possui competência mensal, mas não possui ano.
+    cmv_base_hist = df_cmv[df_cmv["FORN_KEY"] == fornecedor_key].copy()
+    cmv_mes = cmv_base_hist.groupby("MES_NUM")["CMV_VALOR"].sum()
+
+    # Sellout: utiliza ano e mês disponíveis na aba SELLOUT.
+    if df_sellout is not None:
+        sellout_base = df_sellout[df_sellout["FORN_KEY"] == fornecedor_key].copy()
+        if ano_hist is not None and "ANO" in sellout_base.columns and sellout_base["ANO"].notna().any():
+            sellout_base = sellout_base[sellout_base["ANO"] == ano_hist]
+        sellout_mes = sellout_base.groupby("MES_NUM")["FATURAMENTO"].sum()
+    else:
+        sellout_mes = pd.Series(dtype=float)
+
+    historico = pd.DataFrame({"MES_NUM": range(1, 13)})
+    historico["MÊS"] = historico["MES_NUM"].map(
+        {i + 1: nome for i, nome in enumerate(MESES_LABELS)}
+    )
+    historico["COMPRAS"] = historico["MES_NUM"].map(compras_mes).fillna(0.0)
+    historico["CMV"] = historico["MES_NUM"].map(cmv_mes).fillna(0.0)
+    historico["SELLOUT"] = historico["MES_NUM"].map(sellout_mes).fillna(0.0)
+    historico["DIF. CMV - COMPRAS"] = historico["CMV"] - historico["COMPRAS"]
+
+    meses_com_movimento = int(
+        ((historico[["COMPRAS", "CMV", "SELLOUT"]].abs().sum(axis=1)) > 0).sum()
+    )
+    divisor_media = meses_com_movimento if meses_com_movimento > 0 else 12
+
+    total_compras = float(historico["COMPRAS"].sum())
+    total_cmv = float(historico["CMV"].sum())
+    total_sellout = float(historico["SELLOUT"].sum())
+
+    st.subheader(f"Resumo — {fornecedor_nome}" + (f" | {ano_hist}" if ano_hist else ""))
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Total Compras", brl(total_compras), help="Soma das compras do fornecedor no ano selecionado.")
+    with k2:
+        st.metric("Total CMV", brl(total_cmv), help="Soma do CMV mensal disponível na base CMV E ESTOQUE.")
+    with k3:
+        st.metric("Total Sellout", brl(total_sellout), help="Soma do faturamento Sellout do fornecedor no ano selecionado.")
+    with k4:
+        st.metric("Meses com Movimento", meses_com_movimento)
+
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.metric("Média Mensal de Compras", brl(total_compras / divisor_media))
+    with a2:
+        st.metric("Média Mensal de CMV", brl(total_cmv / divisor_media))
+    with a3:
+        st.metric("Média Mensal de Sellout", brl(total_sellout / divisor_media))
+
+    st.subheader("Histórico mensal")
+    st.dataframe(
+        historico[["MÊS", "COMPRAS", "CMV", "SELLOUT", "DIF. CMV - COMPRAS"]]
+        .style
+        .format({
+            "COMPRAS": brl,
+            "CMV": brl,
+            "SELLOUT": brl,
+            "DIF. CMV - COMPRAS": brl,
+        })
+        .map(style_dif, subset=["DIF. CMV - COMPRAS"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    grafico = historico.melt(
+        id_vars=["MES_NUM", "MÊS"],
+        value_vars=["COMPRAS", "CMV", "SELLOUT"],
+        var_name="INDICADOR",
+        value_name="VALOR",
+    )
+    fig = px.line(
+        grafico,
+        x="MÊS",
+        y="VALOR",
+        color="INDICADOR",
+        markers=True,
+        category_orders={"MÊS": MESES_LABELS},
+        title="Evolução mensal — Compras x CMV x Sellout",
+    )
+    fig.update_layout(
+        xaxis_title="Mês",
+        yaxis_title="Valor (R$)",
+        legend_title_text="Indicador",
+        hovermode="x unified",
+        margin=dict(t=55, l=10, r=10, b=10),
+    )
+    fig.update_yaxes(tickprefix="R$ ", separatethousands=True)
+    st.plotly_chart(fig, use_container_width=True, key="grafico_historico_fornecedor")
+
+    st.caption(
+        "Observação: a aba CMV E ESTOQUE possui o mês da competência, mas não possui uma coluna de ano. "
+        "Por isso, o CMV exibido representa os valores mensais disponíveis nessa aba; Compras e Sellout respeitam o ano selecionado."
+    )
+
+
+# -----------------------------
+# Render
+# -----------------------------
+if page == "COMPRAS":
+    render_compras_page()
+elif page == "SELLOUT":
+    render_sellout_page()
+else:
+    render_historico_fornecedor_page()
