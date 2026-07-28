@@ -6,7 +6,7 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-17.10 — Consolidações e divisão Sherwin Automotiva"
+APP_VERSION = "2026-07-28.11 — Consolidação Roberlo e divisões comerciais"
 FILTER_STATE_VERSION = "sellout-mensal-v3"
 
 
@@ -330,6 +330,11 @@ def canonical_supplier(name, brand="") -> str:
         "AUTOAMERICA IMP EXP DE PROD AUTO": "AUTOAMERICA IMP EXP DE PROD AUTO",
     }
     raw = supplier_aliases.get(alias_key, raw)
+
+    # Consolida todas as variações de razão social/cadastro da Roberlo em um
+    # único fornecedor. Ex.: ROBERLO DO BRASIL, ROBERLO BRASIL, ROBERLO LTDA.
+    if "ROBERLO" in alias_key or "ROBERLO" in raw:
+        return "ROBERLO"
 
     if any(marca in brand_n for marca in {"SIKKENS", "WANDA", "TECH FLEET", "TECHFLEET"}):
         return "AKZO NOBEL AUTO"
