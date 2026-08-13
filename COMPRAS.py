@@ -354,6 +354,11 @@ def canonical_supplier(name, brand="") -> str:
         "EVC INDUSTRIAL LTDA": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
         "VONIXX": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
         "VONIXX INDUSTRIA E COMERCIO DE POLIDORES": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
+        # PINCEIS ATLAS S A e ATLAS S A representam o mesmo fornecedor.
+        "PINCEIS ATLAS": "PINCEIS ATLAS S A",
+        "PINCEIS ATLAS S A": "PINCEIS ATLAS S A",
+        "ATLAS": "PINCEIS ATLAS S A",
+        "ATLAS S A": "PINCEIS ATLAS S A",
     }
     raw = supplier_aliases.get(alias_key, raw)
 
