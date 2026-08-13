@@ -6,7 +6,7 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-08-13.12 — Filtro mensal checklist + página Orçamento"
+APP_VERSION = "2026-08-13.20 — Interface BI Dauto + Única"
 FILTER_STATE_VERSION = "orcamento-checklist-v4"
 
 
@@ -846,13 +846,78 @@ def build_budget_pdf(orcamento_df: pd.DataFrame, cmv_base: float, periodo_txt: s
 
 
 # -----------------------------
+# Interface BI — Dauto + Única
+# -----------------------------
+BRAND_IMAGE_B64 = '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'
+
+def inject_bi_css():
+    st.markdown("""
+    <style>
+    :root { --navy:#0c2a5b; --ink:#17243a; --muted:#6f7c90; --line:#e6ebf2; --soft:#f6f8fb; }
+    .stApp { background:#f7f9fc; }
+    [data-testid="stHeader"] { background:rgba(247,249,252,.92); }
+    .block-container { padding-top:1.4rem; padding-bottom:2rem; max-width:1600px; }
+    [data-testid="stSidebar"] { background:#ffffff; border-right:1px solid #e4e9f1; }
+    [data-testid="stSidebar"] .block-container { padding-top:1rem; }
+    [data-testid="stSidebar"] hr { margin:.8rem 0 1rem; border-color:#edf0f5; }
+    [data-testid="stSidebar"] label { color:#33425a; font-size:.82rem; }
+    [data-testid="stSidebar"] div[role="radiogroup"] label { background:#fff; border:1px solid transparent; padding:.48rem .55rem; border-radius:9px; margin:.08rem 0; }
+    [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) { background:#0c2a5b; color:white; }
+    [data-testid="stMetric"] { background:#fff; border:1px solid #e4e9f1; border-radius:14px; padding:14px 16px; box-shadow:0 1px 2px rgba(20,43,77,.04); }
+    [data-testid="stMetricLabel"] { color:#6b778b; font-size:.78rem; font-weight:700; text-transform:uppercase; letter-spacing:.02em; }
+    [data-testid="stMetricValue"] { color:#142a4d; font-size:1.55rem; font-weight:800; }
+    div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] { border:1px solid #e4e9f1; border-radius:12px; overflow:hidden; background:white; }
+    .bi-header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin:0 0 18px; }
+    .bi-title { color:#10284f; font-size:2rem; font-weight:850; margin:0; line-height:1.05; }
+    .bi-subtitle { color:#738096; font-size:.95rem; margin-top:7px; }
+    .bi-period { background:#fff; border:1px solid #e4e9f1; border-radius:12px; padding:10px 14px; min-width:220px; color:#233a60; }
+    .bi-period small { color:#7b8798; display:block; font-weight:700; }
+    .bi-period strong { font-size:.95rem; }
+    .bi-section { background:#fff; border:1px solid #e4e9f1; border-radius:14px; padding:14px 18px 8px; margin:16px 0 10px; }
+    .bi-section-title { font-weight:800; color:#172c51; font-size:1.02rem; margin-bottom:3px; }
+    .bi-section-sub { color:#7a8798; font-size:.82rem; margin-bottom:4px; }
+    .brand-wrap { text-align:center; padding:4px 0 10px; }
+    .brand-wrap img { width:190px; max-width:100%; border-radius:8px; }
+    .brand-caption { color:#8a94a5; font-size:.7rem; margin-top:3px; }
+    .filter-title { font-size:.72rem; font-weight:800; letter-spacing:.07em; color:#78859a; margin-top:.3rem; text-transform:uppercase; }
+    .stButton>button, .stDownloadButton>button, .stFormSubmitButton>button { border-radius:9px; font-weight:700; }
+    .stFormSubmitButton>button { background:#0c2a5b; color:white; border-color:#0c2a5b; }
+    h1,h2,h3 { color:#14294b; }
+    </style>
+    """, unsafe_allow_html=True)
+
+def periodo_resumo():
+    anos_txt = ", ".join(str(x) for x in sel_anos) if sel_anos else "Todos os anos"
+    if not sel_meses_num:
+        meses_txt = "Todos os meses"
+    elif len(sel_meses_num) == 12:
+        meses_txt = "Jan–Dez"
+    else:
+        abbr = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
+        meses_txt = ", ".join(abbr[m-1] for m in sel_meses_num)
+    return f"{meses_txt} / {anos_txt}"
+
+def bi_header(title, subtitle):
+    st.markdown(f"<div class='bi-header'><div><div class='bi-title'>{title}</div><div class='bi-subtitle'>{subtitle}</div></div><div class='bi-period'><small>PERÍODO SELECIONADO</small><strong>{periodo_resumo()}</strong></div></div>", unsafe_allow_html=True)
+
+def section_header(title, subtitle=""):
+    st.markdown(f"<div class='bi-section'><div class='bi-section-title'>{title}</div><div class='bi-section-sub'>{subtitle}</div></div>", unsafe_allow_html=True)
+
+inject_bi_css()
+
+# -----------------------------
 # Sidebar: Página + filtros
 # -----------------------------
-st.sidebar.title("Navegação")
-page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR", "ORÇAMENTO"])
+st.sidebar.markdown(f"<div class='brand-wrap'><img src='data:image/png;base64,{BRAND_IMAGE_B64}'><div class='brand-caption'>PAINEL DE GESTÃO</div></div>", unsafe_allow_html=True)
+st.sidebar.markdown("<div class='filter-title'>Navegação</div>", unsafe_allow_html=True)
+page = st.sidebar.radio(
+    "Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR", "ORÇAMENTO"],
+    format_func=lambda x: {"COMPRAS":"🛒  Compras", "SELLOUT":"📈  Sellout", "HISTÓRICO POR FORNECEDOR":"◷  Histórico por Fornecedor", "ORÇAMENTO":"◎  Orçamento"}[x],
+    label_visibility="collapsed",
+)
 
 st.sidebar.divider()
-st.sidebar.subheader("Filtros")
+st.sidebar.markdown("<div class='filter-title'>Filtros do período</div>", unsafe_allow_html=True)
 
 anos_citel = sorted(df_citel["ANO"].dropna().astype(int).unique().tolist())
 anos_ent = sorted(df_ent["ANO"].dropna().astype(int).unique().tolist())
@@ -887,16 +952,18 @@ with st.sidebar.form("form_filtros_globais", clear_on_submit=False):
     )
     st.markdown("**Meses**")
     meses_atualmente_aplicados = st.session_state.get("filtro_meses_aplicado", MESES_LABELS)
-    mes_cols = st.columns(2)
+    mes_cols = st.columns(3)
     meses_marcados = {}
     for idx, mes in enumerate(MESES_LABELS):
-        meses_marcados[mes] = mes_cols[idx % 2].checkbox(
-            mes.title(),
+        meses_marcados[mes] = mes_cols[idx % 3].checkbox(
+            ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"][idx],
             value=(mes in meses_atualmente_aplicados),
             key=f"filtro_mes_check_{MESES_PT[mes]}",
         )
     sel_meses_input = [mes for mes in MESES_LABELS if meses_marcados.get(mes, False)]
     aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
+
+st.sidebar.caption(f"Versão {APP_VERSION}")
 
 if aplicar_filtros or "filtro_anos_aplicado" not in st.session_state:
     st.session_state["filtro_anos_aplicado"] = sel_anos_input
@@ -926,8 +993,7 @@ df_sellout_f = apply_month_year_filter(df_sellout, apply_year=True, apply_month=
 # PAGE: COMPRAS
 # -----------------------------
 def render_compras_page():
-    st.caption(f"Versão do aplicativo: {APP_VERSION}")
-    st.title("INDICADORES DE COMPRAS")
+    bi_header("Indicadores de Compras", "Análise consolidada de Compras, CMV e Entradas")
 
     if df_citel.empty:
         st.warning("A planilha GIRO E NOTAS atual não possui uma aba com NR_CNPJ_EMITENTE. Os indicadores de Compras CITEL ficarão zerados até essa aba ser incluída; CMV, estoque, entradas e sellout continuam disponíveis.")
@@ -950,43 +1016,18 @@ def render_compras_page():
     media_cmv = total_vendas_cmv / periodos_selecionados
     media_diferenca = dif_topo / periodos_selecionados
 
-    st.subheader("Resumo do Período Selecionado")
-
-    resumo_periodo = pd.DataFrame({
-        "INDICADOR": ["Total Compras", "Total CMV", "Diferença (CMV - Compras)"],
-        "VALOR": [total_compras_citel, total_vendas_cmv, dif_topo],
-        "% SOBRE COMPRAS": [1.0 if total_compras_citel else 0.0,
-                              (total_vendas_cmv / total_compras_citel) if total_compras_citel else 0.0,
-                              dif_pct],
-    })
-
-    st.dataframe(
-        resumo_periodo.style
-        .format({
-            "VALOR": brl,
-            "% SOBRE COMPRAS": lambda x: pct_str(float(x)),
-        })
-        .map(style_dif, subset=["VALOR"]),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
-        st.metric("Média de Compras por Período", brl(media_compras))
-    with m2:
-        st.metric("Média de CMV por Período", brl(media_cmv))
-    with m3:
-        st.metric("Média da Diferença", brl(media_diferenca))
-    with m4:
-        st.metric("Períodos Considerados", periodos_selecionados)
-
-    st.caption("A média considera cada combinação de ano e mês selecionada nos filtros.")
-
-    st.divider()
+    cmv_sobre_compras = (total_vendas_cmv / total_compras_citel) if total_compras_citel else 0.0
+    section_header("Visão executiva do período", "Principais indicadores para acompanhamento do nível de compras")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1: st.metric("Total Compras (CITEL)", brl(total_compras_citel))
+    with m2: st.metric("Total CMV", brl(total_vendas_cmv))
+    with m3: st.metric("Diferença CMV - Compras", brl(dif_topo), delta=pct_str(dif_pct))
+    with m4: st.metric("CMV x Compras", pct_str(cmv_sobre_compras))
+    with m5: st.metric("Períodos Considerados", periodos_selecionados)
+    st.caption(f"Médias do recorte: Compras {brl(media_compras)} • CMV {brl(media_cmv)} • Diferença {brl(media_diferenca)}")
 
     # Tabela por fornecedor (CITEL x CMV)
-    st.subheader("Tabela por Fornecedor — Compras (CITEL) x CMV (Autcom)")
+    section_header("Compras x CMV por Fornecedor", "Participação, compras realizadas, CMV e diferença por fornecedor")
 
     nome_canon = (
         df_cmv_f.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
@@ -996,19 +1037,23 @@ def render_compras_page():
         .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
     )
 
-    vendas = df_cmv_f.groupby("FORN_KEY", as_index=False).agg(**{"VENDAS CMV": ("CMV_VALOR", "sum")})
+    vendas = df_cmv_f.groupby("FORN_KEY", as_index=False).agg(**{"CMV": ("CMV_VALOR", "sum")})
     compras = df_citel_f.groupby("FORN_KEY", as_index=False).agg(**{"COMPRAS FORNECEDOR": ("COMPRA_VALOR", "sum")})
 
     tab = nome_canon.merge(vendas, on="FORN_KEY", how="left").merge(compras, on="FORN_KEY", how="left")
-    tab["VENDAS CMV"] = tab["VENDAS CMV"].fillna(0.0)
+    tab["CMV"] = tab["CMV"].fillna(0.0)
     tab["COMPRAS FORNECEDOR"] = tab["COMPRAS FORNECEDOR"].fillna(0.0)
-    tab["DIF (CMV - COMPRAS)"] = tab["VENDAS CMV"] - tab["COMPRAS FORNECEDOR"]
-    tab = tab[~((tab["VENDAS CMV"] == 0) & (tab["COMPRAS FORNECEDOR"] == 0))].copy()
-    tab = tab[["FORNECEDOR", "COMPRAS FORNECEDOR", "VENDAS CMV", "DIF (CMV - COMPRAS)"]].sort_values("COMPRAS FORNECEDOR", ascending=False)
+    tab["DIF (CMV - COMPRAS)"] = tab["CMV"] - tab["COMPRAS FORNECEDOR"]
+    total_cmv_tab = float(tab["CMV"].sum())
+    total_comp_tab = float(tab["COMPRAS FORNECEDOR"].sum())
+    tab["% CMV"] = tab["CMV"] / total_cmv_tab if total_cmv_tab else 0.0
+    tab["% COMPRAS"] = tab["COMPRAS FORNECEDOR"] / total_comp_tab if total_comp_tab else 0.0
+    tab = tab[~((tab["CMV"] == 0) & (tab["COMPRAS FORNECEDOR"] == 0))].copy()
+    tab = tab[["FORNECEDOR", "COMPRAS FORNECEDOR", "CMV", "DIF (CMV - COMPRAS)", "% CMV", "% COMPRAS"]].sort_values("COMPRAS FORNECEDOR", ascending=False)
 
     st.dataframe(
     tab.style
-      .format({"COMPRAS FORNECEDOR": brl, "VENDAS CMV": brl, "DIF (CMV - COMPRAS)": brl})
+      .format({"COMPRAS FORNECEDOR": brl, "CMV": brl, "DIF (CMV - COMPRAS)": brl, "% CMV": lambda x: pct_str(float(x)), "% COMPRAS": lambda x: pct_str(float(x))})
       .map(style_dif, subset=["DIF (CMV - COMPRAS)"]),
     use_container_width=True,
     hide_index=True
@@ -1017,24 +1062,17 @@ def render_compras_page():
     st.divider()
 
     # Conciliação CITEL x ENTRADAS
-    st.subheader("Conciliação de Compras: CITEL x ENTRADAS")
+    section_header("Conciliação de Compras: CITEL x ENTRADAS", "Validação do total fiscal contra as entradas analíticas")
 
     total_compras_entradas = float(df_ent_f["VR_CONTABIL"].sum())
     dif_citel_vs_ent = total_compras_citel - total_compras_entradas
     color2 = "#0a7a2f" if dif_citel_vs_ent >= 0 else "#b00020"
 
+    dif_ent_pct = (dif_citel_vs_ent / total_compras_citel) if total_compras_citel else 0.0
     d1, d2, d3 = st.columns(3)
-    with d1:
-        st.markdown("### TOTAL COMPRAS (CITEL)")
-        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_compras_citel)}</div>", unsafe_allow_html=True)
-    with d2:
-        st.markdown("### TOTAL COMPRAS (ENTRADAS)")
-        st.markdown(f"<div style='font-size:26px;font-weight:900'>{brl(total_compras_entradas)}</div>", unsafe_allow_html=True)
-    with d3:
-        st.markdown("### DIFERENÇA (CITEL - ENTRADAS)")
-        st.markdown(f"<div style='font-size:26px;font-weight:1000;color:{color2}'>{brl(dif_citel_vs_ent)}</div>", unsafe_allow_html=True)
-
-    st.divider()
+    with d1: st.metric("Total Compras (CITEL)", brl(total_compras_citel))
+    with d2: st.metric("Total Compras (ENTRADAS)", brl(total_compras_entradas))
+    with d3: st.metric("Diferença CITEL - ENTRADAS", brl(dif_citel_vs_ent), delta=pct_str(dif_ent_pct))
 
     # Nuvem de notas (CITEL NR_DOCUMENTO vs ENTRADAS NR NOTA FISCAL)
     st.subheader("Notas no CITEL que não constam em ENTRADAS (por Número da Nota)")
@@ -1328,7 +1366,7 @@ def render_compras_page():
 # PAGE: SELLOUT
 # -----------------------------
 def render_sellout_page():
-    st.title("Indicadores de Sellout ")
+    bi_header("Indicadores de Sellout", "Desempenho de faturamento, participação e giro por fornecedor")
 
     if df_sellout_f is None:
         st.warning("Aba **SELLOUT** não encontrada neste Excel.")
@@ -1730,8 +1768,7 @@ def render_historico_fornecedor_page():
 # PAGE: ORÇAMENTO
 # -----------------------------
 def render_orcamento_page():
-    st.caption(f"Versão do aplicativo: {APP_VERSION}")
-    st.title("ORÇAMENTO")
+    bi_header("Orçamento de Compras", "Distribuição orientada pelo CMV e participação dos fornecedores")
     st.caption(
         "O CMV base é calculado pela média dos 3 meses mais recentes disponíveis na base de CMV. "
         "A participação de cada fornecedor é calculada sobre o CMV do período selecionado nos filtros globais."
@@ -1805,7 +1842,7 @@ def render_orcamento_page():
         st.session_state["orcamento_assinatura"] = assinatura
         st.session_state.pop("orcamento_editor", None)
 
-    st.subheader("Distribuição do orçamento por fornecedor")
+    section_header("Distribuição do orçamento por fornecedor", "Edite somente o orçamento final; os demais campos são calculados automaticamente")
     st.caption(
         "Todos os valores monetários são exibidos no padrão brasileiro. "
         "Edite somente **ORÇAMENTO FINAL**, por exemplo: R$ 595.000,00."
