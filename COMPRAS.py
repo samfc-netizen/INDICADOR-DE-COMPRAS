@@ -348,6 +348,12 @@ def canonical_supplier(name, brand="") -> str:
         "INFINITY INDUSTRIAL ATACADO": "INFINITY INDUSTRIAL",
         "AUTOAMERICA": "AUTOAMERICA IMP EXP DE PROD AUTO",
         "AUTOAMERICA IMP EXP DE PROD AUTO": "AUTOAMERICA IMP EXP DE PROD AUTO",
+        # EVC INDUSTRIAL e VONIXX são o mesmo fornecedor. Consolidação usada
+        # em Compras, CMV, Sellout, Histórico e Orçamento.
+        "EVC INDUSTRIAL": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
+        "EVC INDUSTRIAL LTDA": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
+        "VONIXX": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
+        "VONIXX INDUSTRIA E COMERCIO DE POLIDORES": "VONIXX INDUSTRIA E COMERCIO DE POLIDORES",
     }
     raw = supplier_aliases.get(alias_key, raw)
 
