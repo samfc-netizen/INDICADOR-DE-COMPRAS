@@ -6,8 +6,8 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-07-28.11 — Consolidação Roberlo e divisões comerciais"
-FILTER_STATE_VERSION = "sellout-mensal-v3"
+APP_VERSION = "2026-08-13.12 — Filtro mensal checklist + página Orçamento"
+FILTER_STATE_VERSION = "orcamento-checklist-v4"
 
 
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
@@ -716,10 +716,98 @@ except Exception as e:
 
 
 # -----------------------------
+# Exportação PDF simples (sem dependências adicionais)
+# -----------------------------
+def _pdf_escape_text(value) -> bytes:
+    text = str(value if value is not None else "")
+    text = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return text.encode("cp1252", errors="replace")
+
+
+def build_budget_pdf(orcamento_df: pd.DataFrame, cmv_base: float, periodo_txt: str) -> bytes:
+    """Gera PDF multipágina com fontes padrão do PDF, sem reportlab/fpdf."""
+    rows = []
+    for _, row in orcamento_df.iterrows():
+        rows.append((
+            str(row.get("FORNECEDOR", "")),
+            float(row.get("PARTICIPAÇÃO", 0.0)),
+            float(row.get("ORÇAMENTO FINAL", 0.0)),
+        ))
+
+    total = sum(r[2] for r in rows)
+    page_w, page_h = 842, 595  # A4 paisagem em pontos
+    left, top = 38, 555
+    line_h = 17
+    rows_per_page = 25
+    chunks = [rows[i:i + rows_per_page] for i in range(0, len(rows), rows_per_page)] or [[]]
+
+    objects = []
+    # 1 catalog, 2 pages, 3 font. Páginas/conteúdos começam em 4.
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    page_ids = []
+    content_ids = []
+    next_id = 4
+    for _ in chunks:
+        page_ids.append(next_id); next_id += 1
+        content_ids.append(next_id); next_id += 1
+    kids = b" ".join(f"{pid} 0 R".encode() for pid in page_ids)
+    objects.append(b"<< /Type /Pages /Kids [" + kids + b"] /Count " + str(len(page_ids)).encode() + b" >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+
+    for page_idx, chunk in enumerate(chunks):
+        cmds = []
+        def txt(x, y, size, text):
+            cmds.append(b"BT /F1 " + str(size).encode() + b" Tf " + f"{x} {y} Td ".encode() + b"(" + _pdf_escape_text(text) + b") Tj ET")
+
+        txt(left, top, 17, "ORÇAMENTO DE COMPRAS")
+        txt(left, top - 24, 10, f"Período de participação: {periodo_txt}")
+        txt(left, top - 40, 10, f"CMV base mensal: {brl(cmv_base)}")
+        txt(left, top - 56, 10, f"Orçamento total final: {brl(total)}")
+
+        y = top - 84
+        txt(left, y, 10, "FORNECEDOR")
+        txt(520, y, 10, "PARTICIPAÇÃO")
+        txt(650, y, 10, "ORÇAMENTO FINAL")
+        y -= 8
+        cmds.append(f"{left} {y} m 800 {y} l S".encode())
+        y -= 15
+
+        start = page_idx * rows_per_page + 1
+        for n, (fornecedor, part, valor) in enumerate(chunk, start=start):
+            nome = fornecedor if len(fornecedor) <= 58 else fornecedor[:55] + "..."
+            txt(left, y, 9, f"{n}. {nome}")
+            txt(535, y, 9, pct_str(part))
+            txt(650, y, 9, brl(valor))
+            y -= line_h
+
+        txt(left, 22, 8, f"Página {page_idx + 1} de {len(chunks)}")
+        stream = b"\n".join(cmds)
+        page_obj = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w} {page_h}] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_ids[page_idx]} 0 R >>".encode()
+        content_obj = b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+        objects.append(page_obj)
+        objects.append(content_obj)
+
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out.extend(f"{i} 0 obj\n".encode())
+        out.extend(obj)
+        out.extend(b"\nendobj\n")
+    xref = len(out)
+    out.extend(f"xref\n0 {len(objects)+1}\n".encode())
+    out.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.extend(f"{off:010d} 00000 n \n".encode())
+    out.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode())
+    return bytes(out)
+
+
+# -----------------------------
 # Sidebar: Página + filtros
 # -----------------------------
 st.sidebar.title("Navegação")
-page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR"])
+page = st.sidebar.selectbox("Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR", "ORÇAMENTO"])
 
 st.sidebar.divider()
 st.sidebar.subheader("Filtros")
@@ -755,12 +843,17 @@ with st.sidebar.form("form_filtros_globais", clear_on_submit=False):
         default=st.session_state.get("filtro_anos_aplicado", anos),
         key="filtro_anos_input",
     )
-    sel_meses_input = st.multiselect(
-        "Mês",
-        options=MESES_LABELS,
-        default=st.session_state.get("filtro_meses_aplicado", MESES_LABELS),
-        key="filtro_meses_input",
-    )
+    st.markdown("**Meses**")
+    meses_atualmente_aplicados = st.session_state.get("filtro_meses_aplicado", MESES_LABELS)
+    mes_cols = st.columns(2)
+    meses_marcados = {}
+    for idx, mes in enumerate(MESES_LABELS):
+        meses_marcados[mes] = mes_cols[idx % 2].checkbox(
+            mes.title(),
+            value=(mes in meses_atualmente_aplicados),
+            key=f"filtro_mes_check_{MESES_PT[mes]}",
+        )
+    sel_meses_input = [mes for mes in MESES_LABELS if meses_marcados.get(mes, False)]
     aplicar_filtros = st.form_submit_button("Aplicar filtros", use_container_width=True)
 
 if aplicar_filtros or "filtro_anos_aplicado" not in st.session_state:
@@ -1592,11 +1685,144 @@ def render_historico_fornecedor_page():
 
 
 # -----------------------------
+# PAGE: ORÇAMENTO
+# -----------------------------
+def render_orcamento_page():
+    st.caption(f"Versão do aplicativo: {APP_VERSION}")
+    st.title("ORÇAMENTO")
+    st.caption(
+        "O CMV base é calculado pela média dos 3 meses mais recentes disponíveis na base de CMV. "
+        "A participação de cada fornecedor é calculada sobre o CMV do período selecionado nos filtros globais."
+    )
+
+    if df_cmv.empty:
+        st.warning("Não há dados de CMV disponíveis para montar o orçamento.")
+        return
+
+    cmv_mes = (
+        df_cmv.dropna(subset=["MES_NUM"])
+        .groupby("MES_NUM", as_index=False)["CMV_VALOR"].sum()
+        .sort_values("MES_NUM")
+    )
+    cmv_mes = cmv_mes[cmv_mes["CMV_VALOR"].abs() > 0].copy()
+    ultimos_meses = cmv_mes.tail(3)
+    media_ult_trimestre = float(ultimos_meses["CMV_VALOR"].mean()) if not ultimos_meses.empty else 0.0
+    nomes_ultimos = [MESES_LABELS[int(m)-1].title() for m in ultimos_meses["MES_NUM"].tolist()]
+
+    if "orcamento_cmv_base_input" not in st.session_state:
+        st.session_state["orcamento_cmv_base_input"] = media_ult_trimestre
+
+    def _usar_media_automatica():
+        st.session_state["orcamento_cmv_base_input"] = media_ult_trimestre
+        st.session_state.pop("orcamento_editor", None)
+        st.session_state.pop("orcamento_assinatura", None)
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 1])
+    with c1:
+        cmv_base = st.number_input(
+            "CMV base mensal para orçamento (editável)",
+            min_value=0.0,
+            step=1000.0,
+            format="%.2f",
+            key="orcamento_cmv_base_input",
+        )
+    with c2:
+        st.metric("Média automática — últimos 3 meses", brl(media_ult_trimestre))
+        st.caption(" + ".join(nomes_ultimos) if nomes_ultimos else "Sem meses válidos")
+    with c3:
+        st.button(
+            "Usar média automática",
+            use_container_width=True,
+            on_click=_usar_media_automatica,
+        )
+
+    base_part = df_cmv_f.copy()
+    participacao = (
+        base_part.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
+        .agg(**{"CMV PERÍODO": ("CMV_VALOR", "sum")})
+        .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
+    )
+    participacao = participacao[participacao["CMV PERÍODO"] > 0].copy()
+    total_part = float(participacao["CMV PERÍODO"].sum())
+    if total_part <= 0:
+        st.warning("O período selecionado não possui CMV positivo para calcular a participação dos fornecedores.")
+        return
+
+    participacao["PARTICIPAÇÃO"] = participacao["CMV PERÍODO"] / total_part
+    participacao["PARTICIPAÇÃO %"] = participacao["PARTICIPAÇÃO"] * 100.0
+    participacao["ORÇAMENTO CALCULADO"] = cmv_base * participacao["PARTICIPAÇÃO"]
+    participacao["ORÇAMENTO FINAL"] = participacao["ORÇAMENTO CALCULADO"]
+    participacao = participacao.sort_values("PARTICIPAÇÃO", ascending=False).reset_index(drop=True)
+
+    assinatura = (
+        tuple(sel_meses_num),
+        round(float(cmv_base), 2),
+        tuple(participacao["FORN_KEY"].tolist()),
+    )
+    if st.session_state.get("orcamento_assinatura") != assinatura:
+        st.session_state["orcamento_assinatura"] = assinatura
+        st.session_state.pop("orcamento_editor", None)
+
+    st.subheader("Distribuição do orçamento por fornecedor")
+    st.caption(
+        "Edite somente a coluna **ORÇAMENTO FINAL**. O total abaixo é recalculado automaticamente conforme os valores alterados."
+    )
+
+    editor_df = participacao[[
+        "FORNECEDOR", "CMV PERÍODO", "PARTICIPAÇÃO", "PARTICIPAÇÃO %", "ORÇAMENTO CALCULADO", "ORÇAMENTO FINAL"
+    ]].copy()
+    editado = st.data_editor(
+        editor_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["FORNECEDOR", "CMV PERÍODO", "PARTICIPAÇÃO", "PARTICIPAÇÃO %", "ORÇAMENTO CALCULADO"],
+        column_config={
+            "FORNECEDOR": st.column_config.TextColumn("Fornecedor", width="large"),
+            "CMV PERÍODO": st.column_config.NumberColumn("CMV no período", format="R$ %.2f"),
+            "PARTICIPAÇÃO": None,
+            "PARTICIPAÇÃO %": st.column_config.NumberColumn("Participação", format="%.2f%%"),
+            "ORÇAMENTO CALCULADO": st.column_config.NumberColumn("Orçamento calculado", format="R$ %.2f"),
+            "ORÇAMENTO FINAL": st.column_config.NumberColumn("Orçamento final (editável)", min_value=0.0, step=1000.0, format="R$ %.2f"),
+        },
+        key="orcamento_editor",
+    )
+
+    # Streamlit formata percentual como número bruto; convertemos apenas para exibição fora do editor.
+    editado["ORÇAMENTO FINAL"] = pd.to_numeric(editado["ORÇAMENTO FINAL"], errors="coerce").fillna(0.0)
+    total_final = float(editado["ORÇAMENTO FINAL"].sum())
+    diferenca_base = total_final - float(cmv_base)
+
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        st.metric("CMV base", brl(cmv_base))
+    with k2:
+        st.metric("Orçamento final", brl(total_final))
+    with k3:
+        st.metric("Diferença após ajustes", brl(diferenca_base))
+
+    periodo_txt = ", ".join([m.title() for m in sel_meses]) if sel_meses else "Todos os meses disponíveis"
+    st.caption(f"Participação calculada com base no CMV de: {periodo_txt}.")
+
+    pdf_df = editado.copy()
+    # Na exportação, participação deve permanecer como fração (0,35 = 35%).
+    pdf_bytes = build_budget_pdf(pdf_df, cmv_base, periodo_txt)
+    st.download_button(
+        "Baixar orçamento final em PDF",
+        data=pdf_bytes,
+        file_name="orcamento_compras.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+
+# -----------------------------
 # Render
 # -----------------------------
 if page == "COMPRAS":
     render_compras_page()
 elif page == "SELLOUT":
     render_sellout_page()
-else:
+elif page == "HISTÓRICO POR FORNECEDOR":
     render_historico_fornecedor_page()
+else:
+    render_orcamento_page()
