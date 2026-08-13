@@ -293,13 +293,21 @@ def canonical_supplier(name, brand="") -> str:
     raw = "" if pd.isna(name) else str(name).upper().strip()
     brand_n = "" if pd.isna(brand) else str(brand).upper().strip()
     raw = re.sub(r"^\s*\d+\s*[-–:]\s*", "", raw)
-    raw = re.sub(r"\b(LTDA|S/?A|SA|EIRELI|ME|EPP)\b\.?", " ", raw)
+    raw = re.sub(r"\b(LTDA|S\s*/?\s*A|SA|EIRELI|ME|EPP)\b\.?", " ", raw)
     raw = re.sub(r"[^A-Z0-9À-Ü]+", " ", raw)
     raw = " ".join(raw.split())
 
     # Equivalências confirmadas entre razões sociais, abreviações, alterações
     # societárias e artefatos de HTML (&amp; convertido em AMP).
     alias_key = unicodedata.normalize("NFKD", raw).encode("ASCII", "ignore").decode("ASCII")
+
+    # Consolidação explícita ATLAS. O sufixo societário (S/A, S A, SA) já foi
+    # removido acima; por isso tratamos as formas normalizadas diretamente.
+    # Isso garante que compras, CMV, sellout, histórico e orçamento usem a
+    # mesma chave de fornecedor.
+    if alias_key in {"ATLAS", "ATLAS S A", "PINCEIS ATLAS", "PINCEIS ATLAS S A"}:
+        return "PINCEIS ATLAS S A"
+
     supplier_aliases = {
         "A AMP S TECHNOLOGIES IND E COM": "A S TECHNOLOGIES INDUSTRIA E COMERCIO",
         "A S TECHNOLOGIES INDUSTRIA E COMERCIO": "A S TECHNOLOGIES INDUSTRIA E COMERCIO",
