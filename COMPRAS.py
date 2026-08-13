@@ -99,6 +99,26 @@ def brl(v) -> str:
     s = f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
 
+def parse_brl_value(value) -> float:
+    """Converte texto monetário brasileiro (ex.: R$ 1.770.000,00) em float."""
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return float(value)
+    txt = str(value).strip()
+    if not txt:
+        return 0.0
+    txt = txt.replace("R$", "").replace(" ", "")
+    if "," in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    else:
+        txt = re.sub(r"[^0-9.\-]", "", txt)
+    try:
+        return float(txt)
+    except Exception:
+        return 0.0
+
+
 def pct_str(v: float) -> str:
     try:
         s = f"{v*100:,.2f}"
@@ -730,22 +750,22 @@ def build_budget_pdf(orcamento_df: pd.DataFrame, cmv_base: float, periodo_txt: s
     for _, row in orcamento_df.iterrows():
         rows.append((
             str(row.get("FORNECEDOR", "")),
+            float(row.get("CMV PERÍODO_NUM", 0.0)),
+            float(row.get("COMPRAS PERÍODO_NUM", 0.0)),
+            float(row.get("DIFERENÇA_NUM", 0.0)),
             float(row.get("PARTICIPAÇÃO", 0.0)),
-            float(row.get("ORÇAMENTO FINAL", 0.0)),
+            float(row.get("ORÇAMENTO FINAL_NUM", 0.0)),
         ))
 
-    total = sum(r[2] for r in rows)
-    page_w, page_h = 842, 595  # A4 paisagem em pontos
-    left, top = 38, 555
+    total = sum(r[5] for r in rows)
+    page_w, page_h = 842, 595
+    left, top = 28, 555
     line_h = 17
     rows_per_page = 25
     chunks = [rows[i:i + rows_per_page] for i in range(0, len(rows), rows_per_page)] or [[]]
 
-    objects = []
-    # 1 catalog, 2 pages, 3 font. Páginas/conteúdos começam em 4.
-    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
-    page_ids = []
-    content_ids = []
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>"]
+    page_ids, content_ids = [], []
     next_id = 4
     for _ in chunks:
         page_ids.append(next_id); next_id += 1
@@ -765,35 +785,38 @@ def build_budget_pdf(orcamento_df: pd.DataFrame, cmv_base: float, periodo_txt: s
         txt(left, top - 56, 10, f"Orçamento total final: {brl(total)}")
 
         y = top - 84
-        txt(left, y, 10, "FORNECEDOR")
-        txt(520, y, 10, "PARTICIPAÇÃO")
-        txt(650, y, 10, "ORÇAMENTO FINAL")
+        txt(left, y, 9, "FORNECEDOR")
+        txt(355, y, 9, "CMV")
+        txt(455, y, 9, "COMPRAS")
+        txt(555, y, 9, "DIF.")
+        txt(650, y, 9, "%")
+        txt(700, y, 9, "ORÇAMENTO")
         y -= 8
-        cmds.append(f"{left} {y} m 800 {y} l S".encode())
+        cmds.append(f"{left} {y} m 817 {y} l S".encode())
         y -= 15
 
-        start = page_idx * rows_per_page + 1
-        for n, (fornecedor, part, valor) in enumerate(chunk, start=start):
-            nome = fornecedor if len(fornecedor) <= 58 else fornecedor[:55] + "..."
-            txt(left, y, 9, f"{n}. {nome}")
-            txt(535, y, 9, pct_str(part))
-            txt(650, y, 9, brl(valor))
+        start_row = page_idx * rows_per_page + 1
+        for n, (fornecedor, cmv, compras, dif, part, valor) in enumerate(chunk, start=start_row):
+            nome = fornecedor if len(fornecedor) <= 41 else fornecedor[:38] + "..."
+            txt(left, y, 8, f"{n}. {nome}")
+            txt(355, y, 8, brl(cmv))
+            txt(455, y, 8, brl(compras))
+            txt(555, y, 8, brl(dif))
+            txt(650, y, 8, pct_str(part))
+            txt(700, y, 8, brl(valor))
             y -= line_h
 
         txt(left, 22, 8, f"Página {page_idx + 1} de {len(chunks)}")
         stream = b"\n".join(cmds)
         page_obj = f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w} {page_h}] /Resources << /Font << /F1 3 0 R >> >> /Contents {content_ids[page_idx]} 0 R >>".encode()
         content_obj = b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
-        objects.append(page_obj)
-        objects.append(content_obj)
+        objects.extend([page_obj, content_obj])
 
     out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets = [0]
     for i, obj in enumerate(objects, start=1):
         offsets.append(len(out))
-        out.extend(f"{i} 0 obj\n".encode())
-        out.extend(obj)
-        out.extend(b"\nendobj\n")
+        out.extend(f"{i} 0 obj\n".encode()); out.extend(obj); out.extend(b"\nendobj\n")
     xref = len(out)
     out.extend(f"xref\n0 {len(objects)+1}\n".encode())
     out.extend(b"0000000000 65535 f \n")
@@ -1709,110 +1732,116 @@ def render_orcamento_page():
     media_ult_trimestre = float(ultimos_meses["CMV_VALOR"].mean()) if not ultimos_meses.empty else 0.0
     nomes_ultimos = [MESES_LABELS[int(m)-1].title() for m in ultimos_meses["MES_NUM"].tolist()]
 
-    if "orcamento_cmv_base_input" not in st.session_state:
-        st.session_state["orcamento_cmv_base_input"] = media_ult_trimestre
+    if "orcamento_cmv_base_texto" not in st.session_state:
+        st.session_state["orcamento_cmv_base_texto"] = brl(media_ult_trimestre)
 
     def _usar_media_automatica():
-        st.session_state["orcamento_cmv_base_input"] = media_ult_trimestre
+        st.session_state["orcamento_cmv_base_texto"] = brl(media_ult_trimestre)
         st.session_state.pop("orcamento_editor", None)
         st.session_state.pop("orcamento_assinatura", None)
 
     c1, c2, c3 = st.columns([1.2, 1.2, 1])
     with c1:
-        cmv_base = st.number_input(
+        cmv_base_texto = st.text_input(
             "CMV base mensal para orçamento (editável)",
-            min_value=0.0,
-            step=1000.0,
-            format="%.2f",
-            key="orcamento_cmv_base_input",
+            key="orcamento_cmv_base_texto",
+            help="Use o padrão brasileiro, por exemplo: R$ 1.770.000,00",
         )
+        cmv_base = parse_brl_value(cmv_base_texto)
+        st.caption(f"Valor considerado: **{brl(cmv_base)}**")
     with c2:
         st.metric("Média automática — últimos 3 meses", brl(media_ult_trimestre))
         st.caption(" + ".join(nomes_ultimos) if nomes_ultimos else "Sem meses válidos")
     with c3:
-        st.button(
-            "Usar média automática",
-            use_container_width=True,
-            on_click=_usar_media_automatica,
-        )
+        st.button("Usar média automática", use_container_width=True, on_click=_usar_media_automatica)
 
-    base_part = df_cmv_f.copy()
     participacao = (
-        base_part.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
+        df_cmv_f.groupby(["FORN_KEY", "FORNECEDOR_CMV"], as_index=False)
         .agg(**{"CMV PERÍODO": ("CMV_VALOR", "sum")})
         .rename(columns={"FORNECEDOR_CMV": "FORNECEDOR"})
     )
+    compras_periodo = (
+        df_citel_f.groupby("FORN_KEY", as_index=False)
+        .agg(**{"COMPRAS PERÍODO": ("COMPRA_VALOR", "sum")})
+    ) if not df_citel_f.empty else pd.DataFrame(columns=["FORN_KEY", "COMPRAS PERÍODO"])
+
+    participacao = participacao.merge(compras_periodo, on="FORN_KEY", how="left")
+    participacao["COMPRAS PERÍODO"] = participacao["COMPRAS PERÍODO"].fillna(0.0)
+    participacao["DIFERENÇA (CMV - COMPRAS)"] = participacao["CMV PERÍODO"] - participacao["COMPRAS PERÍODO"]
     participacao = participacao[participacao["CMV PERÍODO"] > 0].copy()
+
     total_part = float(participacao["CMV PERÍODO"].sum())
     if total_part <= 0:
         st.warning("O período selecionado não possui CMV positivo para calcular a participação dos fornecedores.")
         return
 
     participacao["PARTICIPAÇÃO"] = participacao["CMV PERÍODO"] / total_part
-    participacao["PARTICIPAÇÃO %"] = participacao["PARTICIPAÇÃO"] * 100.0
+    participacao["PARTICIPAÇÃO %"] = participacao["PARTICIPAÇÃO"].map(pct_str)
     participacao["ORÇAMENTO CALCULADO"] = cmv_base * participacao["PARTICIPAÇÃO"]
     participacao["ORÇAMENTO FINAL"] = participacao["ORÇAMENTO CALCULADO"]
     participacao = participacao.sort_values("PARTICIPAÇÃO", ascending=False).reset_index(drop=True)
 
-    assinatura = (
-        tuple(sel_meses_num),
-        round(float(cmv_base), 2),
-        tuple(participacao["FORN_KEY"].tolist()),
-    )
+    assinatura = (tuple(sel_anos), tuple(sel_meses_num), round(float(cmv_base), 2), tuple(participacao["FORN_KEY"].tolist()))
     if st.session_state.get("orcamento_assinatura") != assinatura:
         st.session_state["orcamento_assinatura"] = assinatura
         st.session_state.pop("orcamento_editor", None)
 
     st.subheader("Distribuição do orçamento por fornecedor")
     st.caption(
-        "Edite somente a coluna **ORÇAMENTO FINAL**. O total abaixo é recalculado automaticamente conforme os valores alterados."
+        "Todos os valores monetários são exibidos no padrão brasileiro. "
+        "Edite somente **ORÇAMENTO FINAL**, por exemplo: R$ 595.000,00."
     )
 
-    editor_df = participacao[[
-        "FORNECEDOR", "CMV PERÍODO", "PARTICIPAÇÃO", "PARTICIPAÇÃO %", "ORÇAMENTO CALCULADO", "ORÇAMENTO FINAL"
-    ]].copy()
+    editor_df = pd.DataFrame({
+        "FORNECEDOR": participacao["FORNECEDOR"],
+        "CMV PERÍODO": participacao["CMV PERÍODO"].map(brl),
+        "COMPRAS PERÍODO": participacao["COMPRAS PERÍODO"].map(brl),
+        "DIFERENÇA (CMV - COMPRAS)": participacao["DIFERENÇA (CMV - COMPRAS)"].map(brl),
+        "PARTICIPAÇÃO": participacao["PARTICIPAÇÃO %"],
+        "ORÇAMENTO CALCULADO": participacao["ORÇAMENTO CALCULADO"].map(brl),
+        "ORÇAMENTO FINAL": participacao["ORÇAMENTO FINAL"].map(brl),
+    })
+
     editado = st.data_editor(
-        editor_df,
-        use_container_width=True,
-        hide_index=True,
-        disabled=["FORNECEDOR", "CMV PERÍODO", "PARTICIPAÇÃO", "PARTICIPAÇÃO %", "ORÇAMENTO CALCULADO"],
+        editor_df, use_container_width=True, hide_index=True,
+        disabled=["FORNECEDOR", "CMV PERÍODO", "COMPRAS PERÍODO", "DIFERENÇA (CMV - COMPRAS)", "PARTICIPAÇÃO", "ORÇAMENTO CALCULADO"],
         column_config={
             "FORNECEDOR": st.column_config.TextColumn("Fornecedor", width="large"),
-            "CMV PERÍODO": st.column_config.NumberColumn("CMV no período", format="R$ %.2f"),
-            "PARTICIPAÇÃO": None,
-            "PARTICIPAÇÃO %": st.column_config.NumberColumn("Participação", format="%.2f%%"),
-            "ORÇAMENTO CALCULADO": st.column_config.NumberColumn("Orçamento calculado", format="R$ %.2f"),
-            "ORÇAMENTO FINAL": st.column_config.NumberColumn("Orçamento final (editável)", min_value=0.0, step=1000.0, format="R$ %.2f"),
-        },
-        key="orcamento_editor",
+            "CMV PERÍODO": st.column_config.TextColumn("CMV no período"),
+            "COMPRAS PERÍODO": st.column_config.TextColumn("Compras no período"),
+            "DIFERENÇA (CMV - COMPRAS)": st.column_config.TextColumn("Dif. CMV - Compras"),
+            "PARTICIPAÇÃO": st.column_config.TextColumn("Participação"),
+            "ORÇAMENTO CALCULADO": st.column_config.TextColumn("Orçamento calculado"),
+            "ORÇAMENTO FINAL": st.column_config.TextColumn("Orçamento final (editável)", help="Digite no padrão R$ 595.000,00"),
+        }, key="orcamento_editor",
     )
 
-    # Streamlit formata percentual como número bruto; convertemos apenas para exibição fora do editor.
-    editado["ORÇAMENTO FINAL"] = pd.to_numeric(editado["ORÇAMENTO FINAL"], errors="coerce").fillna(0.0)
-    total_final = float(editado["ORÇAMENTO FINAL"].sum())
+    editado["ORÇAMENTO FINAL_NUM"] = editado["ORÇAMENTO FINAL"].map(parse_brl_value)
+    total_final = float(editado["ORÇAMENTO FINAL_NUM"].sum())
     diferenca_base = total_final - float(cmv_base)
+    total_cmv_periodo = float(participacao["CMV PERÍODO"].sum())
+    total_compras_periodo = float(participacao["COMPRAS PERÍODO"].sum())
+    total_dif_periodo = total_cmv_periodo - total_compras_periodo
 
-    k1, k2, k3 = st.columns(3)
-    with k1:
-        st.metric("CMV base", brl(cmv_base))
-    with k2:
-        st.metric("Orçamento final", brl(total_final))
-    with k3:
-        st.metric("Diferença após ajustes", brl(diferenca_base))
+    k1, k2, k3, k4 = st.columns(4)
+    with k1: st.metric("CMV base", brl(cmv_base))
+    with k2: st.metric("Orçamento final", brl(total_final))
+    with k3: st.metric("CMV - Compras do período", brl(total_dif_periodo))
+    with k4: st.metric("Diferença após ajustes", brl(diferenca_base))
 
     periodo_txt = ", ".join([m.title() for m in sel_meses]) if sel_meses else "Todos os meses disponíveis"
     st.caption(f"Participação calculada com base no CMV de: {periodo_txt}.")
 
-    pdf_df = editado.copy()
-    # Na exportação, participação deve permanecer como fração (0,35 = 35%).
+    pdf_df = pd.DataFrame({
+        "FORNECEDOR": participacao["FORNECEDOR"].values,
+        "CMV PERÍODO_NUM": participacao["CMV PERÍODO"].values,
+        "COMPRAS PERÍODO_NUM": participacao["COMPRAS PERÍODO"].values,
+        "DIFERENÇA_NUM": participacao["DIFERENÇA (CMV - COMPRAS)"].values,
+        "PARTICIPAÇÃO": participacao["PARTICIPAÇÃO"].values,
+        "ORÇAMENTO FINAL_NUM": editado["ORÇAMENTO FINAL_NUM"].values,
+    })
     pdf_bytes = build_budget_pdf(pdf_df, cmv_base, periodo_txt)
-    st.download_button(
-        "Baixar orçamento final em PDF",
-        data=pdf_bytes,
-        file_name="orcamento_compras.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-    )
+    st.download_button("Baixar orçamento final em PDF", data=pdf_bytes, file_name="orcamento_compras.pdf", mime="application/pdf", use_container_width=True)
 
 
 # -----------------------------
