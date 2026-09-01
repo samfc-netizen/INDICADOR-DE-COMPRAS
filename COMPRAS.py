@@ -908,7 +908,6 @@ except Exception as e:
 
 # Divergências de fornecedor são calculadas com as versões ORIGINAIS das bases.
 # Assim, uma decisão gravada corrige o painel sem esconder a chegada de um fornecedor novo.
-df_supplier_review = build_supplier_review_candidates(df_cmv, df_ent, df_sellout, SUPPLIER_MEMORY_PATH)
 
 
 # -----------------------------
@@ -2060,7 +2059,13 @@ def render_orcamento_page():
 # -----------------------------
 # PAGE: REVISÃO DE FORNECEDORES
 # -----------------------------
+@st.fragment
 def render_supplier_review_page():
+    # A revisão roda isoladamente. Assim, salvar uma decisão não recarrega
+    # GIRO, NOTAS, SELLOUT e demais bases pesadas do dashboard.
+    df_supplier_review = build_supplier_review_candidates(
+        df_cmv, df_ent, df_sellout, SUPPLIER_MEMORY_PATH
+    )
     bi_header("Revisão de Fornecedores", "Memória por produto: confirme apenas quando surgir uma divergência nova")
 
     st.info(
@@ -2102,9 +2107,10 @@ def render_supplier_review_page():
                 )
                 if st.button("Salvar decisão", key=f"supplier_save_{cod}_{idx}", type="primary"):
                     save_supplier_decision(cod, escolhido, candidatos, SUPPLIER_MEMORY_PATH)
-                    st.success(f"Decisão salva: {cod} → {escolhido}")
-                    st.cache_data.clear()
-                    st.rerun()
+                    st.toast(f"Decisão salva: {cod} → {escolhido}", icon="✅")
+                    # Reexecuta apenas esta tela de revisão, não o dashboard inteiro.
+                    # A decisão some da fila imediatamente e o próximo item aparece.
+                    st.rerun(scope="fragment")
 
     st.divider()
     st.subheader("Memória já salva")
