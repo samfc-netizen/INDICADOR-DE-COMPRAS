@@ -554,6 +554,19 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
             notas.loc[por_cnpj.isna() & por_nome_cadastro.isna() & nome_da_nota.notna(), "METODO_IDENTIFICACAO"] = "NOME DA NF"
 
             notas["FORNECEDOR_CITEL"] = fornecedor_base.map(canonical_supplier).replace("", "FORNECEDOR NÃO IDENTIFICADO").fillna("FORNECEDOR NÃO IDENTIFICADO")
+
+            # Ajuste específico da aba COMPRAS: os dois agrupamentos Sherwin Williams
+            # chegam invertidos em relação ao resultado desejado no dashboard.
+            # Fazemos a troca somente na base de compras (CITEL), sem alterar CMV,
+            # estoque, sellout ou demais indicadores.
+            sherwin_swap = {
+                "SHERWIN WILLIAMS DO BRASIL INDUSTRIA E COMERCIO":
+                    "SHERWIN WILLIAMS DO BRASIL IND E COM DIV AUTOMOTIVA",
+                "SHERWIN WILLIAMS DO BRASIL IND E COM DIV AUTOMOTIVA":
+                    "SHERWIN WILLIAMS DO BRASIL INDUSTRIA E COMERCIO",
+            }
+            notas["FORNECEDOR_CITEL"] = notas["FORNECEDOR_CITEL"].replace(sherwin_swap)
+
             notas["FORN_KEY"] = notas["FORNECEDOR_CITEL"].map(supplier_key)
             notas["COMPRA_VALOR"] = parse_number_br(notas[c_n_val])
             notas["DATA_DT"] = to_datetime_safe(notas[c_n_dt])
