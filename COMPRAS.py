@@ -230,6 +230,39 @@ def save_supplier_decision(cod_key: str, fornecedor_validado: str, fornecedores_
     mem = pd.concat([mem, pd.DataFrame([nova])], ignore_index=True)
     mem.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
 
+def remove_supplier_decision(cod_key: str, path: str = SUPPLIER_MEMORY_PATH):
+    """Remove uma decisão da memória para que o produto volte a ser analisado."""
+    cod_key = product_key(cod_key)
+    if not cod_key:
+        return
+    mem = load_supplier_memory(path)
+    if mem.empty:
+        return
+    mem = mem[mem["COD_KEY"] != cod_key].copy()
+    mem.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
+
+
+def build_product_description_map(*dfs) -> dict:
+    """Monta uma descrição amigável por código usando as bases já carregadas."""
+    desc_map = {}
+    candidates = ("DESCRICAO_ITEM", "DESCRICAO_PRODUTO")
+    for df in dfs:
+        if df is None or df.empty or "COD_KEY" not in df.columns:
+            continue
+        for desc_col in candidates:
+            if desc_col not in df.columns:
+                continue
+            base = df[["COD_KEY", desc_col]].copy()
+            base["COD_KEY"] = base["COD_KEY"].map(product_key)
+            base[desc_col] = base[desc_col].fillna("").astype(str).str.strip()
+            base = base[(base["COD_KEY"] != "") & (base[desc_col] != "")]
+            for _, row in base.iterrows():
+                cod = row["COD_KEY"]
+                if cod not in desc_map:
+                    desc_map[cod] = row[desc_col]
+    return desc_map
+
+
 def _valid_supplier_name(value) -> bool:
     txt = str(value or "").strip()
     return bool(txt) and txt != "FORNECEDOR NÃO IDENTIFICADO"
@@ -2113,12 +2146,104 @@ def render_supplier_review_page():
                     st.rerun(scope="fragment")
 
     st.divider()
-    st.subheader("Memória já salva")
+    st.subheader("Associações já validadas")
+    st.caption(
+        "Aqui você pode corrigir uma decisão anterior sem abrir o arquivo CSV. "
+        "Alterar substitui a associação salva; remover faz o produto voltar para análise."
+    )
+
     mem = load_supplier_memory(SUPPLIER_MEMORY_PATH)
     if mem.empty:
         st.caption("Ainda não há decisões gravadas.")
     else:
-        st.dataframe(mem, use_container_width=True, hide_index=True)
+        desc_map = build_product_description_map(df_cmv, df_ent, df_sellout)
+
+        c_busca, c_total = st.columns([3, 1])
+        with c_busca:
+            busca_mem = st.text_input(
+                "Buscar associação",
+                placeholder="Digite código, produto ou fornecedor...",
+                key="supplier_memory_search"
+            ).strip().upper()
+        with c_total:
+            st.metric("Associações salvas", len(mem))
+
+        mem_view = mem.copy()
+        mem_view["DESCRICAO"] = mem_view["COD_KEY"].map(desc_map).fillna("")
+        if busca_mem:
+            mask = (
+                mem_view["COD_KEY"].astype(str).str.upper().str.contains(busca_mem, regex=False)
+                | mem_view["DESCRICAO"].astype(str).str.upper().str.contains(busca_mem, regex=False)
+                | mem_view["FORNECEDOR_VALIDADO"].astype(str).str.upper().str.contains(busca_mem, regex=False)
+                | mem_view["FORNECEDORES_JA_VISTOS"].astype(str).str.upper().str.contains(busca_mem, regex=False)
+            )
+            mem_view = mem_view[mask].copy()
+
+        if mem_view.empty:
+            st.info("Nenhuma associação encontrada para essa busca.")
+        else:
+            for idx, row in mem_view.reset_index(drop=True).iterrows():
+                cod = str(row["COD_KEY"])
+                desc = str(row.get("DESCRICAO", "") or "").strip()
+                atual = str(row.get("FORNECEDOR_VALIDADO", "") or "").strip()
+                vistos = [
+                    x.strip() for x in str(row.get("FORNECEDORES_JA_VISTOS", "") or "").split("||")
+                    if x.strip()
+                ]
+                if atual and atual not in vistos:
+                    vistos.insert(0, atual)
+
+                updated = str(row.get("ATUALIZADO_EM", "") or "").strip()
+                titulo = f"{cod} — {desc if desc else 'Produto sem descrição'}"
+
+                with st.expander(titulo, expanded=False):
+                    st.markdown(f"**Fornecedor atual:** :blue[{atual}]")
+                    if vistos:
+                        st.caption("Fornecedores já encontrados: " + " • ".join(vistos))
+                    if updated:
+                        st.caption(f"Última alteração: {updated}")
+
+                    novo_fornecedor = st.selectbox(
+                        "Fornecedor correto para este produto",
+                        options=vistos,
+                        index=vistos.index(atual) if atual in vistos else 0,
+                        key=f"memory_edit_choice_{cod}_{idx}"
+                    )
+
+                    col_save, col_delete = st.columns([1, 1])
+                    with col_save:
+                        if st.button(
+                            "Salvar alteração",
+                            key=f"memory_edit_save_{cod}_{idx}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            save_supplier_decision(
+                                cod, novo_fornecedor, vistos, SUPPLIER_MEMORY_PATH
+                            )
+                            st.toast(
+                                f"Associação atualizada: {cod} → {novo_fornecedor}",
+                                icon="✅"
+                            )
+                            st.rerun(scope="fragment")
+
+                    with col_delete:
+                        confirmar = st.checkbox(
+                            "Confirmar remoção",
+                            key=f"memory_delete_confirm_{cod}_{idx}"
+                        )
+                        if st.button(
+                            "Remover associação",
+                            key=f"memory_delete_{cod}_{idx}",
+                            disabled=not confirmar,
+                            use_container_width=True
+                        ):
+                            remove_supplier_decision(cod, SUPPLIER_MEMORY_PATH)
+                            st.toast(
+                                f"Associação removida para o produto {cod}.",
+                                icon="🗑️"
+                            )
+                            st.rerun(scope="fragment")
 
 # -----------------------------
 # Render
