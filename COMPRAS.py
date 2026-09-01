@@ -6,7 +6,7 @@ import unicodedata
 import os
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-08-13.20 — Interface BI Dauto + Única"
+APP_VERSION = "2026-09-01.21 — Memória de fornecedor por produto"
 FILTER_STATE_VERSION = "orcamento-checklist-v4"
 
 
@@ -15,6 +15,7 @@ CAD_FORNECEDORES_PATH = "CADASTRO DE FORNECEDORES.csv"
 CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
 SELLOUT_PATH = "sellout.csv"
 NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
+SUPPLIER_MEMORY_PATH = "MEMORIA_FORNECEDORES.csv"
 
 # Itens administrativos/serviços que não devem compor os indicadores comerciais.
 EXCLUDED_PRODUCT_KEYS = {"22940"}  # PRESTAÇÃO DE SERVIÇOS
@@ -180,6 +181,126 @@ def most_frequent_nonempty(series: pd.Series) -> str:
     if s.empty:
         return ""
     return str(s.value_counts().index[0])
+
+
+# -----------------------------
+# Memória de fornecedor por produto
+# -----------------------------
+SUPPLIER_MEMORY_COLUMNS = [
+    "COD_KEY", "FORNECEDOR_VALIDADO", "FORNECEDORES_JA_VISTOS", "ATUALIZADO_EM"
+]
+
+def load_supplier_memory(path: str = SUPPLIER_MEMORY_PATH) -> pd.DataFrame:
+    """Lê as decisões manuais de fornecedor. O arquivo é criado no primeiro aceite."""
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+    try:
+        mem = pd.read_csv(path, sep=";", dtype=str, encoding="utf-8-sig").fillna("")
+    except Exception:
+        return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+    for col in SUPPLIER_MEMORY_COLUMNS:
+        if col not in mem.columns:
+            mem[col] = ""
+    mem["COD_KEY"] = mem["COD_KEY"].map(product_key)
+    mem = mem[mem["COD_KEY"] != ""].drop_duplicates("COD_KEY", keep="last")
+    return mem[SUPPLIER_MEMORY_COLUMNS]
+
+def supplier_memory_map(path: str = SUPPLIER_MEMORY_PATH) -> dict:
+    mem = load_supplier_memory(path)
+    if mem.empty:
+        return {}
+    return dict(zip(mem["COD_KEY"], mem["FORNECEDOR_VALIDADO"]))
+
+def save_supplier_decision(cod_key: str, fornecedor_validado: str, fornecedores_vistos, path: str = SUPPLIER_MEMORY_PATH):
+    """Persiste a decisão e registra quais alternativas já foram revisadas."""
+    cod_key = product_key(cod_key)
+    fornecedor_validado = str(fornecedor_validado or "").strip()
+    vistos = sorted({str(x).strip() for x in fornecedores_vistos if str(x).strip()})
+    if not cod_key or not fornecedor_validado:
+        raise ValueError("Código e fornecedor validado são obrigatórios.")
+
+    mem = load_supplier_memory(path)
+    nova = {{
+        "COD_KEY": cod_key,
+        "FORNECEDOR_VALIDADO": fornecedor_validado,
+        "FORNECEDORES_JA_VISTOS": " || ".join(vistos),
+        "ATUALIZADO_EM": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }}
+    mem = mem[mem["COD_KEY"] != cod_key].copy()
+    mem = pd.concat([mem, pd.DataFrame([nova])], ignore_index=True)
+    mem.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
+
+def _valid_supplier_name(value) -> bool:
+    txt = str(value or "").strip()
+    return bool(txt) and txt != "FORNECEDOR NÃO IDENTIFICADO"
+
+def build_supplier_review_candidates(df_cmv, df_ent, df_sellout, memory_path: str = SUPPLIER_MEMORY_PATH) -> pd.DataFrame:
+    """
+    Localiza produtos cujo fornecedor mudou/diverge entre as bases.
+    Uma divergência já analisada não reaparece; somente fornecedor novo reabre a revisão.
+    """
+    rows = []
+
+    def add_source(df, supplier_col, source, desc_col=None):
+        if df is None or df.empty or "COD_KEY" not in df.columns or supplier_col not in df.columns:
+            return
+        cols = ["COD_KEY", supplier_col] + ([desc_col] if desc_col and desc_col in df.columns else [])
+        base = df[cols].copy()
+        base["COD_KEY"] = base["COD_KEY"].map(product_key)
+        base = base[base["COD_KEY"] != ""]
+        for _, r in base.iterrows():
+            forn = str(r.get(supplier_col, "") or "").strip()
+            if not _valid_supplier_name(forn):
+                continue
+            rows.append({
+                "COD_KEY": r["COD_KEY"],
+                "FORNECEDOR": forn,
+                "FONTE": source,
+                "DESCRICAO": str(r.get(desc_col, "") or "").strip() if desc_col else "",
+            })
+
+    add_source(df_cmv, "FORNECEDOR_CMV_ORIGINAL", "CADASTRO/GIRO", "DESCRICAO_ITEM")
+    add_source(df_ent, "FORNECEDOR_ENT_ORIGINAL", "ENTRADAS", "DESCRICAO_ITEM")
+    add_source(df_sellout, "FORNECEDOR_SELLOUT_ORIGINAL", "SELLOUT", "DESCRICAO_PRODUTO")
+
+    ev = pd.DataFrame(rows)
+    if ev.empty:
+        return pd.DataFrame(columns=["COD_KEY", "DESCRICAO", "FORNECEDOR_ATUAL", "SUGESTAO", "CANDIDATOS", "NOVOS", "FONTES"])
+
+    mem = load_supplier_memory(memory_path)
+    mem_idx = mem.set_index("COD_KEY").to_dict("index") if not mem.empty else {{}}
+    out = []
+    for cod, grp in ev.groupby("COD_KEY"):
+        counts = grp["FORNECEDOR"].value_counts()
+        candidatos = counts.index.tolist()
+        if len(candidatos) <= 1:
+            continue
+
+        m = mem_idx.get(cod)
+        if m:
+            vistos = {x.strip() for x in str(m.get("FORNECEDORES_JA_VISTOS", "")).split("||") if x.strip()}
+            novos = [x for x in candidatos if x not in vistos]
+            if not novos:
+                continue
+            atual = str(m.get("FORNECEDOR_VALIDADO", "")).strip()
+            sugestao = atual or candidatos[0]
+        else:
+            novos = candidatos
+            # Prioriza evidência operacional (Entradas/Sellout) sobre o cadastro atual.
+            op = grp[grp["FONTE"].isin(["ENTRADAS", "SELLOUT"])]
+            sugestao = str(op["FORNECEDOR"].value_counts().index[0]) if not op.empty else candidatos[0]
+            atual = sugestao
+
+        desc = most_frequent_nonempty(grp["DESCRICAO"])
+        fontes = "; ".join(
+            f"{{f}}: {{', '.join(g['FORNECEDOR'].value_counts().index.tolist())}}"
+            for f, g in grp.groupby("FONTE")
+        )
+        out.append({
+            "COD_KEY": cod, "DESCRICAO": desc, "FORNECEDOR_ATUAL": atual,
+            "SUGESTAO": sugestao, "CANDIDATOS": candidatos, "NOVOS": novos, "FONTES": fontes
+        })
+    return pd.DataFrame(out)
 
 
 # -----------------------------
@@ -455,7 +576,7 @@ def empty_citel():
 
 
 @st.cache_data(show_spinner=False)
-def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str, cache_token=None):
+def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_path: str, entradas_path: str, memory_path: str = SUPPLIER_MEMORY_PATH, cache_token=None):
     # ---------------- CADASTROS ----------------
     cad_forn = read_report_csv(cad_forn_path, ("CÓDIGO", "NOME DO FORNECEDOR", "C.P.F./C.N.P.J."), cache_token)
     c_cnpj = find_col(cad_forn, "C.P.F./C.N.P.J.") or find_col(cad_forn, "CPF/CNPJ")
@@ -485,10 +606,17 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
         raise ValueError(f"CADASTRO PRODUTOS GERAL: colunas obrigatórias ausentes. Colunas: {list(cad_prod.columns)}")
     cad_prod["COD_KEY"] = cad_prod[c_prod_cod].map(product_key)
     cad_prod["FORNECEDOR_PROD"] = cad_prod[c_prod_forn].fillna("").astype(str).str.strip()
+    cad_prod["FORNECEDOR_PROD_ORIGINAL"] = cad_prod["FORNECEDOR_PROD"]
     cad_prod["LINHA_PROD"] = cad_prod[c_prod_linha].fillna("").astype(str).str.strip()
     cad_prod["MARCA_PROD"] = cad_prod[c_prod_marca].fillna("").astype(str).str.strip() if c_prod_marca else ""
     cad_prod = cad_prod[cad_prod["COD_KEY"] != ""].drop_duplicates("COD_KEY", keep="last")
-    prod_lookup = cad_prod[["COD_KEY", "FORNECEDOR_PROD", "LINHA_PROD", "MARCA_PROD"]]
+
+    # Uma decisão manual passa a prevalecer sobre alterações futuras do cadastro.
+    memory_map = supplier_memory_map(memory_path)
+    if memory_map:
+        mem_supplier = cad_prod["COD_KEY"].map(memory_map).fillna("")
+        cad_prod["FORNECEDOR_PROD"] = mem_supplier.where(mem_supplier != "", cad_prod["FORNECEDOR_PROD"])
+    prod_lookup = cad_prod[["COD_KEY", "FORNECEDOR_PROD", "FORNECEDOR_PROD_ORIGINAL", "LINHA_PROD", "MARCA_PROD"]]
 
     # ---------------- GIRO / CMV / ESTOQUE + NOTAS CITEL ----------------
     xls = pd.ExcelFile(giro_path)
@@ -520,6 +648,7 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     giro["DESCRICAO_ITEM"] = giro[c_g_desc].fillna("").astype(str).str.strip() if c_g_desc else ""
     giro["LINHA"] = giro["LINHA_PROD"].fillna("").astype(str).str.strip()
     giro_hint = giro["MARCA"].fillna("").astype(str) + " " + giro["DESCRICAO_ITEM"].fillna("").astype(str)
+    giro["FORNECEDOR_CMV_ORIGINAL"] = [supplier_division(n, h) for n, h in zip(giro["FORNECEDOR_PROD_ORIGINAL"], giro_hint)]
     giro["FORNECEDOR_CMV"] = [supplier_division(n, h) for n, h in zip(giro["FORNECEDOR_PROD"], giro_hint)]
     giro["FORNECEDOR_CMV"] = giro["FORNECEDOR_CMV"].replace("", "FORNECEDOR NÃO IDENTIFICADO").fillna("FORNECEDOR NÃO IDENTIFICADO")
     giro["FORN_KEY"] = giro["FORNECEDOR_CMV"].map(supplier_key)
@@ -593,7 +722,11 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     ent["MARCA"] = ent[c_e_marca].fillna("").astype(str).str.strip() if c_e_marca else ""
     ent["DESCRICAO_ITEM"] = ent[c_e_desc].fillna("").astype(str).str.strip() if c_e_desc else ""
     ent_hint = ent["MARCA"].fillna("").astype(str) + " " + ent["DESCRICAO_ITEM"].fillna("").astype(str)
-    ent["FORNECEDOR_ENT"] = [supplier_division(n, h) for n, h in zip(ent[c_e_forn], ent_hint)]
+    ent["FORNECEDOR_ENT_ORIGINAL"] = [supplier_division(n, h) for n, h in zip(ent[c_e_forn], ent_hint)]
+    ent["FORNECEDOR_ENT"] = ent["FORNECEDOR_ENT_ORIGINAL"]
+    if memory_map:
+        mem_ent = ent["COD_KEY"].map(memory_map).fillna("")
+        ent.loc[mem_ent != "", "FORNECEDOR_ENT"] = mem_ent[mem_ent != ""]
     ent["FORN_KEY"] = ent["FORNECEDOR_ENT"].map(supplier_key)
     ent["VR_CONTABIL"] = parse_number_br(ent[c_e_val])
     ent["NR_NOTA_FISCAL"] = ent[c_e_doc]
@@ -692,7 +825,14 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
     fornecedor_prod = so["FORNECEDOR_PROD"].fillna("").astype(str).str.strip()
     fornecedor_relatorio = so[c_s_forn].fillna("").astype(str).str.strip() if c_s_forn else pd.Series("", index=so.index)
     fornecedor_base_so = fornecedor_prod.where(fornecedor_prod != "", fornecedor_relatorio)
+    # Mantém uma versão sem a memória para detectar mudanças futuras.
+    fornecedor_original_so = so["FORNECEDOR_PROD_ORIGINAL"].fillna("").astype(str).str.strip()
+    fornecedor_original_so = fornecedor_original_so.where(fornecedor_original_so != "", fornecedor_relatorio)
+    so["FORNECEDOR_SELLOUT_ORIGINAL"] = [supplier_division(n, h) for n, h in zip(fornecedor_original_so, sellout_hint)]
     so["FORNECEDOR_SELLOUT"] = [supplier_division(n, h) for n, h in zip(fornecedor_base_so, sellout_hint)]
+    if memory_map:
+        mem_so = so["COD_KEY"].map(memory_map).fillna("")
+        so.loc[mem_so != "", "FORNECEDOR_SELLOUT"] = mem_so[mem_so != ""]
     # Segunda chance: alguns cadastros têm fornecedor inválido, embora o relatório
     # de Sellout possua o agrupamento correto na própria linha.
     vazios_so = so["FORNECEDOR_SELLOUT"].fillna("").astype(str).str.strip() == ""
@@ -757,14 +897,18 @@ try:
     ]
     cache_token = tuple(
         (os.path.getmtime(path), os.path.getsize(path)) for path in arquivos_origem
-    )
+    ) + ((os.path.getmtime(SUPPLIER_MEMORY_PATH), os.path.getsize(SUPPLIER_MEMORY_PATH)) if os.path.exists(SUPPLIER_MEMORY_PATH) else (0, 0),)
     df_cmv, df_citel, df_ent, df_sellout = load_data(
         GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
-        SELLOUT_PATH, NOTAS_ENTRADA_PATH, cache_token
+        SELLOUT_PATH, NOTAS_ENTRADA_PATH, SUPPLIER_MEMORY_PATH, cache_token
     )
 except Exception as e:
     st.error(f"Erro ao carregar as bases: {e}")
     st.stop()
+
+# Divergências de fornecedor são calculadas com as versões ORIGINAIS das bases.
+# Assim, uma decisão gravada corrige o painel sem esconder a chegada de um fornecedor novo.
+df_supplier_review = build_supplier_review_candidates(df_cmv, df_ent, df_sellout, SUPPLIER_MEMORY_PATH)
 
 
 # -----------------------------
@@ -924,8 +1068,8 @@ inject_bi_css()
 st.sidebar.markdown(f"<div class='brand-wrap'><img src='data:image/png;base64,{BRAND_IMAGE_B64}'><div class='brand-caption'>PAINEL DE GESTÃO</div></div>", unsafe_allow_html=True)
 st.sidebar.markdown("<div class='filter-title'>Navegação</div>", unsafe_allow_html=True)
 page = st.sidebar.radio(
-    "Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR", "ORÇAMENTO"],
-    format_func=lambda x: {"COMPRAS":"🛒  Compras", "SELLOUT":"📈  Sellout", "HISTÓRICO POR FORNECEDOR":"◷  Histórico por Fornecedor", "ORÇAMENTO":"◎  Orçamento"}[x],
+    "Página", ["COMPRAS", "SELLOUT", "HISTÓRICO POR FORNECEDOR", "REVISÃO DE FORNECEDORES", "ORÇAMENTO"],
+    format_func=lambda x: {"COMPRAS":"🛒  Compras", "SELLOUT":"📈  Sellout", "HISTÓRICO POR FORNECEDOR":"◷  Histórico por Fornecedor", "REVISÃO DE FORNECEDORES":"✓  Revisão de Fornecedores", "ORÇAMENTO":"◎  Orçamento"}[x],
     label_visibility="collapsed",
 )
 
@@ -1914,6 +2058,63 @@ def render_orcamento_page():
 
 
 # -----------------------------
+# PAGE: REVISÃO DE FORNECEDORES
+# -----------------------------
+def render_supplier_review_page():
+    bi_header("Revisão de Fornecedores", "Memória por produto: confirme apenas quando surgir uma divergência nova")
+
+    st.info(
+        "Quando um produto aparece com fornecedores diferentes, você decide qual deve prevalecer. "
+        "A decisão fica salva em MEMORIA_FORNECEDORES.csv e a mesma divergência não será perguntada novamente."
+    )
+
+    if df_supplier_review.empty:
+        st.success("Nenhuma divergência nova de fornecedor para revisar.")
+    else:
+        st.warning(f"Há {{len(df_supplier_review)}} produto(s) com fornecedor novo ou divergente.")
+        for idx, row in df_supplier_review.reset_index(drop=True).iterrows():
+            cod = str(row["COD_KEY"])
+            desc = str(row.get("DESCRICAO", "") or "")
+            candidatos = list(row.get("CANDIDATOS", []))
+            sugestao = str(row.get("SUGESTAO", "") or "")
+            novos = list(row.get("NOVOS", []))
+            titulo = f"{{cod}} — {{desc if desc else 'Produto sem descrição'}}"
+            with st.expander(titulo, expanded=(idx == 0)):
+                c1, c2 = st.columns([1, 1])
+                with c1:
+                    st.markdown(f"**Fornecedor validado/sugerido:** {{sugestao}}")
+                    st.markdown(f"**Novo(s) fornecedor(es) detectado(s):** {{', '.join(novos)}}")
+                with c2:
+                    st.caption("Evidências encontradas nas bases")
+                    st.write(row.get("FONTES", ""))
+
+                options = candidatos.copy()
+                if sugestao and sugestao not in options:
+                    options.insert(0, sugestao)
+                default_idx = options.index(sugestao) if sugestao in options else 0
+                escolhido = st.selectbox(
+                    "Qual fornecedor deve ficar vinculado a este produto?",
+                    options=options, index=default_idx, key=f"supplier_choice_{{cod}}_{{idx}}"
+                )
+                st.caption(
+                    "Se você mantiver o fornecedor atual, o novo fornecedor ficará registrado como já analisado "
+                    "e não voltará a gerar pergunta. Se surgir uma terceira opção no futuro, a revisão reaparece."
+                )
+                if st.button("Salvar decisão", key=f"supplier_save_{{cod}}_{{idx}}", type="primary"):
+                    save_supplier_decision(cod, escolhido, candidatos, SUPPLIER_MEMORY_PATH)
+                    st.success(f"Decisão salva: {{cod}} → {{escolhido}}")
+                    st.cache_data.clear()
+                    st.rerun()
+
+    st.divider()
+    st.subheader("Memória já salva")
+    mem = load_supplier_memory(SUPPLIER_MEMORY_PATH)
+    if mem.empty:
+        st.caption("Ainda não há decisões gravadas.")
+    else:
+        st.dataframe(mem, use_container_width=True, hide_index=True)
+
+# -----------------------------
 # Render
 # -----------------------------
 if page == "COMPRAS":
@@ -1922,5 +2123,7 @@ elif page == "SELLOUT":
     render_sellout_page()
 elif page == "HISTÓRICO POR FORNECEDOR":
     render_historico_fornecedor_page()
+elif page == "REVISÃO DE FORNECEDORES":
+    render_supplier_review_page()
 else:
     render_orcamento_page()
