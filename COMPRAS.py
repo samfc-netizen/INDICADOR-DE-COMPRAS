@@ -220,12 +220,12 @@ def save_supplier_decision(cod_key: str, fornecedor_validado: str, fornecedores_
         raise ValueError("Código e fornecedor validado são obrigatórios.")
 
     mem = load_supplier_memory(path)
-    nova = {{
+    nova = {
         "COD_KEY": cod_key,
         "FORNECEDOR_VALIDADO": fornecedor_validado,
         "FORNECEDORES_JA_VISTOS": " || ".join(vistos),
         "ATUALIZADO_EM": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }}
+    }
     mem = mem[mem["COD_KEY"] != cod_key].copy()
     mem = pd.concat([mem, pd.DataFrame([nova])], ignore_index=True)
     mem.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
@@ -268,7 +268,7 @@ def build_supplier_review_candidates(df_cmv, df_ent, df_sellout, memory_path: st
         return pd.DataFrame(columns=["COD_KEY", "DESCRICAO", "FORNECEDOR_ATUAL", "SUGESTAO", "CANDIDATOS", "NOVOS", "FONTES"])
 
     mem = load_supplier_memory(memory_path)
-    mem_idx = mem.set_index("COD_KEY").to_dict("index") if not mem.empty else {{}}
+    mem_idx = mem.set_index("COD_KEY").to_dict("index") if not mem.empty else {}
     out = []
     for cod, grp in ev.groupby("COD_KEY"):
         counts = grp["FORNECEDOR"].value_counts()
@@ -293,7 +293,7 @@ def build_supplier_review_candidates(df_cmv, df_ent, df_sellout, memory_path: st
 
         desc = most_frequent_nonempty(grp["DESCRICAO"])
         fontes = "; ".join(
-            f"{{f}}: {{', '.join(g['FORNECEDOR'].value_counts().index.tolist())}}"
+            f"{f}: {', '.join(g['FORNECEDOR'].value_counts().index.tolist())}"
             for f, g in grp.groupby("FONTE")
         )
         out.append({
@@ -2071,19 +2071,19 @@ def render_supplier_review_page():
     if df_supplier_review.empty:
         st.success("Nenhuma divergência nova de fornecedor para revisar.")
     else:
-        st.warning(f"Há {{len(df_supplier_review)}} produto(s) com fornecedor novo ou divergente.")
+        st.warning(f"Há {len(df_supplier_review)} produto(s) com fornecedor novo ou divergente.")
         for idx, row in df_supplier_review.reset_index(drop=True).iterrows():
             cod = str(row["COD_KEY"])
             desc = str(row.get("DESCRICAO", "") or "")
             candidatos = list(row.get("CANDIDATOS", []))
             sugestao = str(row.get("SUGESTAO", "") or "")
             novos = list(row.get("NOVOS", []))
-            titulo = f"{{cod}} — {{desc if desc else 'Produto sem descrição'}}"
+            titulo = f"{cod} — {desc if desc else 'Produto sem descrição'}"
             with st.expander(titulo, expanded=(idx == 0)):
                 c1, c2 = st.columns([1, 1])
                 with c1:
-                    st.markdown(f"**Fornecedor validado/sugerido:** {{sugestao}}")
-                    st.markdown(f"**Novo(s) fornecedor(es) detectado(s):** {{', '.join(novos)}}")
+                    st.markdown(f"**Fornecedor validado/sugerido:** {sugestao}")
+                    st.markdown(f"**Novo(s) fornecedor(es) detectado(s):** {', '.join(novos)}")
                 with c2:
                     st.caption("Evidências encontradas nas bases")
                     st.write(row.get("FONTES", ""))
@@ -2094,15 +2094,15 @@ def render_supplier_review_page():
                 default_idx = options.index(sugestao) if sugestao in options else 0
                 escolhido = st.selectbox(
                     "Qual fornecedor deve ficar vinculado a este produto?",
-                    options=options, index=default_idx, key=f"supplier_choice_{{cod}}_{{idx}}"
+                    options=options, index=default_idx, key=f"supplier_choice_{cod}_{idx}"
                 )
                 st.caption(
                     "Se você mantiver o fornecedor atual, o novo fornecedor ficará registrado como já analisado "
                     "e não voltará a gerar pergunta. Se surgir uma terceira opção no futuro, a revisão reaparece."
                 )
-                if st.button("Salvar decisão", key=f"supplier_save_{{cod}}_{{idx}}", type="primary"):
+                if st.button("Salvar decisão", key=f"supplier_save_{cod}_{idx}", type="primary"):
                     save_supplier_decision(cod, escolhido, candidatos, SUPPLIER_MEMORY_PATH)
-                    st.success(f"Decisão salva: {{cod}} → {{escolhido}}")
+                    st.success(f"Decisão salva: {cod} → {escolhido}")
                     st.cache_data.clear()
                     st.rerun()
 
