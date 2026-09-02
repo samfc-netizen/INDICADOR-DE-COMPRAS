@@ -4,9 +4,18 @@ import plotly.express as px
 import re
 import unicodedata
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+except ImportError:
+    gspread = None
+    Credentials = None
 
 st.set_page_config(page_title="Indicador de Compras", layout="wide")
-APP_VERSION = "2026-09-01.21 — Memória de fornecedor por produto"
+APP_VERSION = "2026-09-02.22 — Memória de fornecedores no Google Sheets"
 FILTER_STATE_VERSION = "orcamento-checklist-v4"
 
 
@@ -15,7 +24,9 @@ CAD_FORNECEDORES_PATH = "CADASTRO DE FORNECEDORES.csv"
 CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
 SELLOUT_PATH = "sellout.csv"
 NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
-SUPPLIER_MEMORY_PATH = "MEMORIA_FORNECEDORES.csv"
+SUPPLIER_MEMORY_PATH = "MEMORIA_FORNECEDORES.csv"  # fallback local, usado apenas sem Secrets
+SUPPLIER_MEMORY_SPREADSHEET_ID = "1jx--9QLyCTeH1KC6DNhoaJ4dTd0RhzabotK5YUSgq8A"
+SUPPLIER_MEMORY_WORKSHEET = "MEMORIA_FORNECEDORES"
 
 # Itens administrativos/serviços que não devem compor os indicadores comerciais.
 EXCLUDED_PRODUCT_KEYS = {"22940"}  # PRESTAÇÃO DE SERVIÇOS
@@ -185,19 +196,89 @@ def most_frequent_nonempty(series: pd.Series) -> str:
 
 # -----------------------------
 # Memória de fornecedor por produto
+# Google Sheets em produção + fallback CSV para desenvolvimento local
 # -----------------------------
 SUPPLIER_MEMORY_COLUMNS = [
     "COD_KEY", "FORNECEDOR_VALIDADO", "FORNECEDORES_JA_VISTOS", "ATUALIZADO_EM"
 ]
 
-def load_supplier_memory(path: str = SUPPLIER_MEMORY_PATH) -> pd.DataFrame:
-    """Lê as decisões manuais de fornecedor. O arquivo é criado no primeiro aceite."""
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+def _supplier_memory_uses_sheets() -> bool:
+    """Retorna True quando as credenciais do Google estiverem configuradas no Streamlit Secrets."""
     try:
-        mem = pd.read_csv(path, sep=";", dtype=str, encoding="utf-8-sig").fillna("")
+        return "gcp_service_account" in st.secrets
     except Exception:
+        return False
+
+@st.cache_resource(show_spinner=False)
+def _supplier_memory_worksheet():
+    """Abre a aba persistente da memória de fornecedores no Google Sheets."""
+    if gspread is None or Credentials is None:
+        raise RuntimeError(
+            "Dependências do Google Sheets ausentes. Adicione gspread e google-auth ao requirements.txt."
+        )
+
+    try:
+        service_account_info = dict(st.secrets["gcp_service_account"])
+    except Exception as exc:
+        raise RuntimeError(
+            "Credenciais gcp_service_account não encontradas nos Secrets do Streamlit."
+        ) from exc
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    credentials = Credentials.from_service_account_info(
+        service_account_info, scopes=scopes
+    )
+    client = gspread.authorize(credentials)
+
+    spreadsheet = client.open_by_key(SUPPLIER_MEMORY_SPREADSHEET_ID)
+    try:
+        worksheet = spreadsheet.worksheet(SUPPLIER_MEMORY_WORKSHEET)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title=SUPPLIER_MEMORY_WORKSHEET, rows=1000, cols=len(SUPPLIER_MEMORY_COLUMNS)
+        )
+
+    # Garante cabeçalho mesmo em uma aba recém-criada/vazia.
+    header = worksheet.row_values(1)
+    if header != SUPPLIER_MEMORY_COLUMNS:
+        worksheet.update(
+            range_name=f"A1:D1",
+            values=[SUPPLIER_MEMORY_COLUMNS],
+        )
+    return worksheet
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _load_supplier_memory_from_sheets(cache_buster: int = 0) -> pd.DataFrame:
+    """Carrega a memória do Sheets; cache_buster permite invalidação imediata após gravação."""
+    worksheet = _supplier_memory_worksheet()
+    rows = worksheet.get_all_records(expected_headers=SUPPLIER_MEMORY_COLUMNS)
+    if not rows:
         return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+    mem = pd.DataFrame(rows).fillna("")
+    for col in SUPPLIER_MEMORY_COLUMNS:
+        if col not in mem.columns:
+            mem[col] = ""
+    return mem[SUPPLIER_MEMORY_COLUMNS]
+
+def _clear_supplier_memory_cache():
+    """Invalida somente o cache leve da memória, sem limpar as bases pesadas do dashboard."""
+    _load_supplier_memory_from_sheets.clear()
+
+def load_supplier_memory(path: str = SUPPLIER_MEMORY_PATH) -> pd.DataFrame:
+    """Lê as decisões manuais. Em produção usa Google Sheets; sem Secrets usa CSV local."""
+    if _supplier_memory_uses_sheets():
+        mem = _load_supplier_memory_from_sheets().copy()
+    else:
+        if not os.path.exists(path):
+            return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+        try:
+            mem = pd.read_csv(path, sep=";", dtype=str, encoding="utf-8-sig").fillna("")
+        except Exception:
+            return pd.DataFrame(columns=SUPPLIER_MEMORY_COLUMNS)
+
     for col in SUPPLIER_MEMORY_COLUMNS:
         if col not in mem.columns:
             mem[col] = ""
@@ -212,29 +293,68 @@ def supplier_memory_map(path: str = SUPPLIER_MEMORY_PATH) -> dict:
     return dict(zip(mem["COD_KEY"], mem["FORNECEDOR_VALIDADO"]))
 
 def save_supplier_decision(cod_key: str, fornecedor_validado: str, fornecedores_vistos, path: str = SUPPLIER_MEMORY_PATH):
-    """Persiste a decisão e registra quais alternativas já foram revisadas."""
+    """Persiste uma decisão. No Sheets atualiza apenas a linha do produto, sem regravar a tabela inteira."""
     cod_key = product_key(cod_key)
     fornecedor_validado = str(fornecedor_validado or "").strip()
     vistos = sorted({str(x).strip() for x in fornecedores_vistos if str(x).strip()})
     if not cod_key or not fornecedor_validado:
         raise ValueError("Código e fornecedor validado são obrigatórios.")
 
+    atualizado_em = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%Y-%m-%d %H:%M:%S")
+    values = [
+        cod_key,
+        fornecedor_validado,
+        " || ".join(vistos),
+        atualizado_em,
+    ]
+
+    if _supplier_memory_uses_sheets():
+        worksheet = _supplier_memory_worksheet()
+
+        # Localiza COD_KEY na coluna A. Se existe, atualiza somente a linha;
+        # se não existe, acrescenta uma nova associação.
+        try:
+            cell = worksheet.find(cod_key, in_column=1)
+        except Exception:
+            cell = None
+
+        if cell and cell.row > 1:
+            worksheet.update(
+                range_name=f"A{cell.row}:D{cell.row}",
+                values=[values],
+            )
+        else:
+            worksheet.append_row(values, value_input_option="RAW")
+
+        _clear_supplier_memory_cache()
+        return
+
+    # Fallback local para desenvolvimento sem Secrets.
     mem = load_supplier_memory(path)
-    nova = {
-        "COD_KEY": cod_key,
-        "FORNECEDOR_VALIDADO": fornecedor_validado,
-        "FORNECEDORES_JA_VISTOS": " || ".join(vistos),
-        "ATUALIZADO_EM": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    nova = dict(zip(SUPPLIER_MEMORY_COLUMNS, values))
     mem = mem[mem["COD_KEY"] != cod_key].copy()
     mem = pd.concat([mem, pd.DataFrame([nova])], ignore_index=True)
     mem.to_csv(path, sep=";", index=False, encoding="utf-8-sig")
 
 def remove_supplier_decision(cod_key: str, path: str = SUPPLIER_MEMORY_PATH):
-    """Remove uma decisão da memória para que o produto volte a ser analisado."""
+    """Remove uma decisão da memória e faz o produto voltar para análise."""
     cod_key = product_key(cod_key)
     if not cod_key:
         return
+
+    if _supplier_memory_uses_sheets():
+        worksheet = _supplier_memory_worksheet()
+        try:
+            cell = worksheet.find(cod_key, in_column=1)
+        except Exception:
+            cell = None
+
+        if cell and cell.row > 1:
+            worksheet.delete_rows(cell.row)
+        _clear_supplier_memory_cache()
+        return
+
+    # Fallback local para desenvolvimento sem Secrets.
     mem = load_supplier_memory(path)
     if mem.empty:
         return
@@ -928,9 +1048,15 @@ try:
         GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
         SELLOUT_PATH, NOTAS_ENTRADA_PATH,
     ]
+    # A memória agora pode vir do Google Sheets. O fingerprint invalida o cache
+    # das bases quando uma associação é alterada, sem depender do mtime de CSV local.
+    _mem_for_token = load_supplier_memory(SUPPLIER_MEMORY_PATH)
+    _memory_fingerprint = tuple(
+        _mem_for_token.fillna("").astype(str).itertuples(index=False, name=None)
+    )
     cache_token = tuple(
         (os.path.getmtime(path), os.path.getsize(path)) for path in arquivos_origem
-    ) + ((os.path.getmtime(SUPPLIER_MEMORY_PATH), os.path.getsize(SUPPLIER_MEMORY_PATH)) if os.path.exists(SUPPLIER_MEMORY_PATH) else (0, 0),)
+    ) + (_memory_fingerprint,)
     df_cmv, df_citel, df_ent, df_sellout = load_data(
         GIRO_NOTAS_PATH, CAD_FORNECEDORES_PATH, CAD_PRODUTOS_PATH,
         SELLOUT_PATH, NOTAS_ENTRADA_PATH, SUPPLIER_MEMORY_PATH, cache_token
@@ -2103,7 +2229,8 @@ def render_supplier_review_page():
 
     st.info(
         "Quando um produto aparece com fornecedores diferentes, você decide qual deve prevalecer. "
-        "A decisão fica salva em MEMORIA_FORNECEDORES.csv e a mesma divergência não será perguntada novamente."
+        "Com o Google configurado, a decisão fica salva permanentemente na aba MEMORIA_FORNECEDORES "
+        "e a mesma divergência não será perguntada novamente."
     )
 
     if df_supplier_review.empty:
@@ -2148,7 +2275,7 @@ def render_supplier_review_page():
     st.divider()
     st.subheader("Associações já validadas")
     st.caption(
-        "Aqui você pode corrigir uma decisão anterior sem abrir o arquivo CSV. "
+        "Aqui você pode corrigir uma decisão anterior sem editar a planilha manualmente. "
         "Alterar substitui a associação salva; remover faz o produto voltar para análise."
     )
 
