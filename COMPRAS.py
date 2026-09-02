@@ -1326,6 +1326,7 @@ def render_compras_page():
         dif_pct = 0.0
 
     # Quantidade real de competências selecionadas (ano x mês), usada nas médias.
+    # Ex.: Jan a Mar de um ano = 3 períodos; Jan a Mar de dois anos = 6 períodos.
     periodos_selecionados = max(len(sel_anos) * len(sel_meses_num), 1)
     media_compras = total_compras_citel / periodos_selecionados
     media_cmv = total_vendas_cmv / periodos_selecionados
@@ -1339,7 +1340,15 @@ def render_compras_page():
     with m3: st.metric("Diferença CMV - Compras", brl(dif_topo), delta=pct_str(dif_pct))
     with m4: st.metric("CMV x Compras", pct_str(cmv_sobre_compras))
     with m5: st.metric("Períodos Considerados", periodos_selecionados)
-    st.caption(f"Médias do recorte: Compras {brl(media_compras)} • CMV {brl(media_cmv)} • Diferença {brl(media_diferenca)}")
+
+    st.caption("Médias mensais calculadas de acordo com o período selecionado")
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.metric("Média Mensal de Compras", brl(media_compras))
+    with a2:
+        st.metric("Média Mensal de CMV", brl(media_cmv))
+    with a3:
+        st.metric("Média Mensal da Diferença", brl(media_diferenca))
 
     # Tabela por fornecedor (CITEL x CMV)
     section_header("Compras x CMV por Fornecedor", "Participação, compras realizadas, CMV e diferença por fornecedor")
