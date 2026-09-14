@@ -1231,6 +1231,17 @@ page = st.sidebar.radio(
     label_visibility="collapsed",
 )
 
+st.sidebar.markdown(
+    """
+    <a href="https://script.google.com/macros/s/AKfycbx6BmWGlLI6_Auf8kf9n1CoKQ3OR_FEhjpUUDrySr_izkfDWUYFJniAhsyykErdYsfZ/exec"
+       target="_blank" rel="noopener noreferrer"
+       style="display:block;text-decoration:none;background:#fff;color:#233a60;border:1px solid #e4e9f1;border-radius:9px;padding:0.62rem 0.75rem;margin:0.35rem 0 0.55rem;font-weight:700;font-size:0.92rem;">
+       🔴&nbsp;&nbsp;Dashboard de Pedidos em tempo real ↗
+    </a>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.sidebar.divider()
 st.sidebar.markdown("<div class='filter-title'>Filtros do período</div>", unsafe_allow_html=True)
 
