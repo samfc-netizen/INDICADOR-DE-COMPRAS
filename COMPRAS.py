@@ -2117,29 +2117,36 @@ def render_historico_fornecedor_page():
 def render_orcamento_page():
     bi_header("Orçamento de Compras", "Distribuição orientada pelo CMV e participação dos fornecedores")
     st.caption(
-        "O CMV base é calculado pela média dos 3 meses mais recentes disponíveis na base de CMV. "
-        "A participação de cada fornecedor é calculada sobre o CMV do período selecionado nos filtros globais."
+        "O CMV base automático é calculado pela média mensal dos meses selecionados no filtro lateral. "
+        "A participação de cada fornecedor também é calculada sobre o CMV do período selecionado nos filtros globais."
     )
 
     if df_cmv.empty:
         st.warning("Não há dados de CMV disponíveis para montar o orçamento.")
         return
 
-    cmv_mes = (
-        df_cmv.dropna(subset=["MES_NUM"])
+    # Média automática: usa exclusivamente os meses selecionados no filtro lateral.
+    # df_cmv_f já contém o filtro global de meses aplicado.
+    cmv_mes_selecionado = (
+        df_cmv_f.dropna(subset=["MES_NUM"])
         .groupby("MES_NUM", as_index=False)["CMV_VALOR"].sum()
         .sort_values("MES_NUM")
     )
-    cmv_mes = cmv_mes[cmv_mes["CMV_VALOR"].abs() > 0].copy()
-    ultimos_meses = cmv_mes.tail(3)
-    media_ult_trimestre = float(ultimos_meses["CMV_VALOR"].mean()) if not ultimos_meses.empty else 0.0
-    nomes_ultimos = [MESES_LABELS[int(m)-1].title() for m in ultimos_meses["MES_NUM"].tolist()]
+    cmv_mes_selecionado = cmv_mes_selecionado[
+        cmv_mes_selecionado["MES_NUM"].isin(sel_meses_num)
+    ].copy()
+
+    media_periodo_selecionado = (
+        float(cmv_mes_selecionado["CMV_VALOR"].sum()) / len(sel_meses_num)
+        if sel_meses_num else 0.0
+    )
+    nomes_media = [MESES_LABELS[int(m)-1].title() for m in sel_meses_num]
 
     if "orcamento_cmv_base_texto" not in st.session_state:
-        st.session_state["orcamento_cmv_base_texto"] = brl(media_ult_trimestre)
+        st.session_state["orcamento_cmv_base_texto"] = brl(media_periodo_selecionado)
 
     def _usar_media_automatica():
-        st.session_state["orcamento_cmv_base_texto"] = brl(media_ult_trimestre)
+        st.session_state["orcamento_cmv_base_texto"] = brl(media_periodo_selecionado)
         st.session_state.pop("orcamento_editor", None)
         st.session_state.pop("orcamento_assinatura", None)
 
@@ -2153,8 +2160,8 @@ def render_orcamento_page():
         cmv_base = parse_brl_value(cmv_base_texto)
         st.caption(f"Valor considerado: **{brl(cmv_base)}**")
     with c2:
-        st.metric("Média automática — últimos 3 meses", brl(media_ult_trimestre))
-        st.caption(" + ".join(nomes_ultimos) if nomes_ultimos else "Sem meses válidos")
+        st.metric("Média automática — meses selecionados", brl(media_periodo_selecionado))
+        st.caption(" + ".join(nomes_media) if nomes_media else "Nenhum mês selecionado")
     with c3:
         st.button("Usar média automática", use_container_width=True, on_click=_usar_media_automatica)
 
