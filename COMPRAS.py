@@ -22,7 +22,7 @@ FILTER_STATE_VERSION = "orcamento-checklist-v4"
 GIRO_NOTAS_PATH = "GIRO E NOTAS.xlsx"
 CAD_FORNECEDORES_PATH = "CADASTRO DE FORNECEDORES.csv"
 CAD_PRODUTOS_PATH = "CADASTRO PRODUTOS GERAL.csv"
-SELLOUT_PATH = "sellout.csv"
+SELLOUT_PATH = "sellout.xlsx"
 NOTAS_ENTRADA_PATH = "NOTAS DE ENTRADA.csv"
 SUPPLIER_MEMORY_PATH = "MEMORIA_FORNECEDORES.csv"  # fallback local, usado apenas sem Secrets
 SUPPLIER_MEMORY_SPREADSHEET_ID = "1jx--9QLyCTeH1KC6DNhoaJ4dTd0RhzabotK5YUSgq8A"
@@ -959,7 +959,9 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
                 ], ignore_index=True)
 
     # ---------------- SELLOUT ----------------
-    so = read_report_csv(sellout_path, ("FORNECEDOR", "CÓDIGO", "FATURAMENTO"), cache_token)
+    # SELLOUT consolidado em Excel (.xlsx).
+    # A planilha já contém a coluna MÊS, usada para a competência mensal.
+    so = strip_cols(pd.read_excel(sellout_path, sheet_name=0, dtype=str))
     c_s_cod = find_col(so, "CÓDIGO") or find_col(so, "CODIGO")
     c_s_forn = find_col(so, "FORNECEDOR")
     c_s_desc = find_col(so, "DESCRIÇÃO DO PRODUTO") or find_col(so, "DESCRICAO DO PRODUTO")
@@ -1003,10 +1005,9 @@ def load_data(giro_path: str, cad_forn_path: str, cad_prod_path: str, sellout_pa
 
     # Competência do Sellout. Quando existe a coluna MÊS, ela prevalece sobre
     # o período geral do cabeçalho e permite os filtros/históricos mensais reais.
-    text = open(sellout_path, "r", encoding="latin1", errors="ignore").read()[:8000]
-    mi = re.search(r"Data Inicial \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
-    mf = re.search(r"Data Final \(Entrada\)\s*:\s*(\d{2}/\d{2}/\d{4})", text, re.I)
-    data_ref = pd.to_datetime(mf.group(1), dayfirst=True) if mf else (pd.to_datetime(mi.group(1), dayfirst=True) if mi else pd.NaT)
+    # Em XLSX não existe o cabeçalho textual do relatório CSV.
+    # A competência vem da coluna MÊS; o ano é inferido das demais bases abaixo.
+    data_ref = pd.NaT
 
     if c_s_mes:
         so["MES_NUM"] = so[c_s_mes].map(parse_mes_to_num).astype("Int64")
