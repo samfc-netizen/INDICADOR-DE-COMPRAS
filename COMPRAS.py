@@ -583,6 +583,9 @@ def canonical_supplier(name, brand="") -> str:
         return "PINCEIS ATLAS S A"
 
     supplier_aliases = {
+        # MADERMACK e MADEMACK representam o mesmo fornecedor.
+        "MADERMACK": "MADERMACK",
+        "MADEMACK": "MADERMACK",
         "A AMP S TECHNOLOGIES IND E COM": "A S TECHNOLOGIES INDUSTRIA E COMERCIO",
         "A S TECHNOLOGIES INDUSTRIA E COMERCIO": "A S TECHNOLOGIES INDUSTRIA E COMERCIO",
         "A S TECHNOLOGIES INDUSTRIA E COMERCIO S A": "A S TECHNOLOGIES INDUSTRIA E COMERCIO",
